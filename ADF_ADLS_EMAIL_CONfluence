@@ -1,127 +1,101 @@
-Title: Implementation Guide: Automated File Delivery Pipeline (ADLS Gen2 to Email)
-Status: APPROVED | Target Audience: Engineers & DevOps
-ℹ️ CORE CAPABILITY: AUTOMATED FILE DELIVERY PIPELINE (ADLS GEN2 TO EMAIL)
-
-Objective: Establish a direct, event-driven link between the cloud data store and downstream consumer email boxes.
-
-Automation Boundary: The pipeline operates independently of scheduled batch processing. The arrival of a physical file in the ADLS container acts as the sole required execution signal.
-
-Target State: Replaces manual file downloads, cross-network data migrations, and Outlook attachment tasks with a zero-touch Azure workflow.
-
-🛡️ CROSS-SERVICE SECURITY: ENCRYPTED EMAIL VIA LOGIC APPS FROM ADF
-
-Orchestration Split: Azure Data Factory acts strictly as the Data Processor and Trigger Listener. It handles no email distribution. Azure Logic Apps acts exclusively as the Data Deliverer and SMTP Interface.
-
-The Network Handoff: ADF initiates communication by making an outbound HTTP POST web request containing a structured JSON package. This handoff travels across the secure Microsoft Global Backbone Network using TLS 1.2 encryption.
-
-Credential Isolation: The Logic App authenticates with the Office 365 Exchange server using a User-Assigned Managed Identity. This eliminates any storage of service account passwords, tokens, or credentials within the pipeline definition or code repository.
-
-1. Prerequisites & Environment Setup
-Before building the pipeline, ensure the following foundational items are provisioned and permissions are assigned:
-
-Azure Resources Required
-Azure Data Lake Storage (ADLS) Gen2 Account (containing the target landing container/folder).
-
-Azure Data Factory (ADF) Instance (V2).
-
-Azure Logic App (Consumption or Standard tier).
-
-User-Assigned Managed Identity (UMI).
-
-Security & Access Control (IAM)
-Assign the following permissions to your User-Assigned Managed Identity to allow access across the services:
-
-On the ADLS Gen2 Account: Assign the Storage Blob Data Reader role to the UMI so ADF can read the raw file content.
-
-On the Synapse/SQL Workspace (If scaling is tied to this architecture): Assign the SQL DB Contributor role.
-
-On the Logic App: Go to Identity > User Assigned and add the UMI to give the Logic App access to this identity block.
-
-2. Configuration Flow
-Follow these sequential setup steps to establish the technical handshake.
-
-Step 1: The Logic App Blueprint (The Receiver)
-The Logic App must be configured first so that it generates the HTTP POST URL required by ADF.
-
-Create a blank Logic App and add the When an HTTP request is received trigger.
-
-Use the following Request Body JSON Schema to tell the Logic App exactly how to map the incoming data fields:
-
-JSON
-{
-    "type": "object",
-    "properties": {
-        "fileName": { "type": "string" },
-        "fileContent": {
-            "type": "object",
-            "properties": {
-                "$content-type": { "type": "string" },
-                "$content": { "type": "string" }
-            }
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Enterprise Network Test Portal</title>
+    <style>
+        :root {
+            --bg-color: #0f172a;
+            --card-bg: #1e293b;
+            --text-main: #f8fafc;
+            --text-muted: #94a3b8;
+            --accent: #38bdf8;
+            --success: #34d399;
         }
-    }
-}
-Add the Send an email (V2) - Office 365 Outlook action.
 
-In the Attachments section, set the fields dynamically:
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            margin: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+        }
 
-Attachment Name: Use the token fileName from the trigger.
+        .container {
+            background-color: var(--card-bg);
+            padding: 2.5rem;
+            border-radius: 12px;
+            box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.3);
+            max-width: 500px;
+            width: 100%;
+            text-align: center;
+            border: 1px solid #334155;
+        }
 
-Attachment Content: Switch to the expression editor and use:
-base64ToBinary(triggerBody()?['fileContent']?['$content'])
+        .badge {
+            background-color: rgba(52, 211, 153, 0.1);
+            color: var(--success);
+            padding: 0.35rem 0.75rem;
+            border-radius: 9999px;
+            font-size: 0.85rem;
+            font-weight: 600;
+            display: inline-block;
+            margin-bottom: 1rem;
+        }
 
-Save the Logic App. Copy the generated HTTP POST URL from the trigger block.
+        h1 {
+            font-size: 1.75rem;
+            margin: 0 0 0.5rem 0;
+            color: var(--text-main);
+        }
 
-Step 2: The ADF Storage Event Trigger (The Listener)
-This component automates the execution loop based on file availability.
+        p {
+            color: var(--text-muted);
+            font-size: 1rem;
+            line-height: 1.5;
+            margin-bottom: 2rem;
+        }
 
-In ADF, create a new Storage Event Trigger.
+        .network-details {
+            background-color: #0f172a;
+            padding: 1rem;
+            border-radius: 6px;
+            text-align: left;
+            font-family: monospace;
+            font-size: 0.9rem;
+            border: 1px solid #334155;
+        }
 
-Select your ADLS Gen2 Storage Account and the specific container/folder path you want to watch.
+        .network-details div {
+            margin-bottom: 0.5rem;
+        }
 
-Set the Event type to Blob created.
+        .network-details div:last-child {
+            margin-bottom: 0;
+        }
 
-In the trigger parameter mapping section, bind the file metadata to your pipeline parameters:
+        .label {
+            color: var(--accent);
+        }
+    </style>
+</head>
+<body>
 
-Pipeline Parameter FileName: @trigger().outputs.body.fileName
+    <div class="container">
+        <div class="badge">🔒 Private Routing Active</div>
+        <h1>Static Web App Live</h1>
+        <p>If you are reading this page, your client machine successfully completed DNS resolution and routed traffic via your secure network infrastructure.</p>
+        
+        <div class="network-details">
+            <div><span class="label">Status:</span> Connected</div>
+            <div><span class="label">Host Engine:</span> Azure Storage ($web)</div>
+            <div><span class="label">Access Path:</span> Azure Private Link</div>
+        </div>
+    </div>
 
-Pipeline Parameter FolderPath: @trigger().outputs.body.folderPath
-
-Step 3: The ADF Retrieval Activity
-Add a Get File Content activity to your pipeline canvas.
-
-Connect it to an ADLS Gen2 dataset. Use the pipeline parameters to construct the dynamic file path: @dataset().FolderPath and @dataset().FileName.
-
-Open the Settings tab of this activity and check Secure Output. This ensures the data read from the lake is masked inside the monitoring logs.
-
-Step 4: The ADF Web Activity Handoff
-Add a Web Activity to the canvas and link it downstream from the Get File Content activity.
-
-Configure the settings:
-
-URL: Paste the HTTP POST URL copied from your Logic App in Step 1.
-
-Method: POST
-
-Body: Paste the following code snippet:
-
-JSON
-{
-    "fileName": "@{pipeline().parameters.FileName}",
-    "fileContent": {
-        "$content-type": "application/octet-stream",
-        "$content": "@{base64(activity('GetFileContent').output.Response)}"
-    }
-}
-Open the Settings tab of the Web Activity and check Secure Input. This prevents the data package from being leaked inside the outbound HTTP logs.
-
-3. Operational Constraints & Thresholds
-When planning a deployment with this setup, maintain awareness of these platform limits:
-
-Payload Boundary: The ADF Web Activity imposes a strict 4 MB limit on request sizes.
-
-Encoding Expansion: Base64 encoding introduces an approximate 33% expansion to the data footprint.
-
-Maximum Stable File Size: To prevent processing failures or data truncation, source files routed through this specific pipeline must remain under 2.5 MB.
-
-Large File Strategy: For assets exceeding this file size, architecture dictates that the pattern should shift: ADF passes only the folder metadata path, and the Logic App uses a native connection to pull data directly from the storage layer.
+</body>
+</html>
