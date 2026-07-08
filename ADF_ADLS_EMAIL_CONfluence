@@ -3,8 +3,6 @@ from collections import Counter
 
 file_path = r"C:\Users\B135388\adhoc-code\archive_000000.0000.d53ae85f-81be-4ca0-86df-c77afabeaace.json"
 
-print("⏳ Deep diving into Datadog log attributes... please wait...")
-
 try:
     with open(file_path, "r") as f:
         data = json.load(f)
@@ -16,35 +14,27 @@ except json.JSONDecodeError:
                 data.append(json.loads(line))
 
 if isinstance(data, list):
-    total_records = len(data)
-    print(f"\n📊 Total Records in File: {total_records}")
+    # Let's inspect 't2_x_request_id' inside attributes
+    req_ids = []
+    null_or_missing_count = 0
     
-    # 1. Check for Duplicate Log IDs (_id)
-    log_ids = [str(record.get("_id")) for record in data if "_id" in record]
-    if log_ids:
-        id_counts = Counter(log_ids)
-        unique_ids = len(id_counts)
-        print(f"🔑 Unique Log IDs (_id): {unique_ids}")
-        print(f"🔄 Duplicate Log Count: {total_records - unique_ids}")
-        
-        if total_records - unique_ids > 0:
-            print("⚠️ ALERT: Exact same log entries are duplicated inside this raw file!")
+    for record in data:
+        attrs = record.get("attributes", {})
+        if isinstance(attrs, dict):
+            req_id = attrs.get("t2_x_request_id")
+            if req_id:
+                req_ids.append(str(req_id))
+            else:
+                null_or_missing_count += 1
+        else:
+            null_or_missing_count += 1
+            
+    print(f"🆔 Total t2_x_request_ids found: {len(req_ids)}")
+    print(f"⚪ Missing/Null t2_x_request_ids: {null_or_missing_count}")
     
-    # 2. Look inside the 'attributes' dictionary for keys
-    print("\n🔍 Checking nested keys inside 'attributes':")
-    sample_attributes = data[0].get("attributes", {})
-    if isinstance(sample_attributes, dict):
-        print(f"Available nested keys: {list(sample_attributes.keys())}")
-        
-        # Let's see if there's a player or customer key in there
-        # If you see your specific player key in the list above, swap it here:
-        nested_target = "player_id" 
-        
-        if nested_target in sample_attributes:
-            nested_ids = [str(record.get("attributes", {}).get(nested_target)) for record in data]
-            nested_counts = Counter(nested_ids)
-            print(f"\n🔥 Top Duplicated {nested_target}s inside attributes:")
-            for item, count in nested_counts.most_common(5):
-                print(f"   {nested_target}: {item} -> appears {count} times")
-    else:
-        print(" 'attributes' field is not a dictionary nested block.")
+    if req_ids:
+        req_counts = Counter(req_ids)
+        print(f"🧩 Unique t2_x_request_ids: {len(req_counts)}")
+        print("\n🔥 Top Repeated t2_x_request_ids (Possible Join Exploders):")
+        for item, count in req_counts.most_common(5):
+            print(f"   ID: {item} -> appears {count} times")
