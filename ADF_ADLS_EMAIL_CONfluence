@@ -1,34 +1,47 @@
 import json
-import pandas as pd
+from collections import Counter
 
-# Load the local JSON file
+# Update this to match your local filename exactly
 file_path = "your_file.json"
 
+print("⏳ Reading and parsing file... please wait...")
+
 try:
-    with open(file_path, 'r') as f:
+    # Try reading as a standard single JSON array/file
+    with open(file_path, "r") as f:
         data = json.load(f)
+except json.JSONDecodeError:
+    # If that fails, read it as a JSON Lines / NDJSON file (line-by-line)
+    data = []
+    with open(file_path, "r") as f:
+        for line in f:
+            if line.strip():
+                data.append(json.loads(line))
+
+# Handle list of records
+if isinstance(data, list):
+    total_records = len(data)
+    print(f"\n📊 Total Records in File: {total_records}")
     
-    # Convert to a Pandas DataFrame for easy analysis
-    df = pd.DataFrame(data)
+    # Let's count keys to check for duplicates
+    # Replace 'player_id' or 'event_id' with whatever unique key your data uses
+    target_id_key = "player_id" 
     
-    print(f"📊 Total Records in File: {len(df)}")
+    ids = [str(record.get(target_id_key)) for record in data if target_id_key in record]
     
-    # 1. Check for completely identical rows
-    duplicate_rows = df.duplicated().sum()
-    print(f"🔄 Exact Duplicate Rows: {duplicate_rows}")
-    
-    # 2. Check for specific ID duplicates (e.g., event_id or player_id)
-    # Replace 'event_id' with whatever your unique identifier key is called
-    if 'event_id' in df.columns:
-        total_ids = len(df['event_id'])
-        unique_ids = df['event_id'].nunique()
-        print(f"🔑 Total IDs: {total_ids} | Unique IDs: {unique_ids}")
-        print(f"⚠️ Duplicate ID Count: {total_ids - unique_ids}")
+    if ids:
+        id_counts = Counter(ids)
+        unique_ids = len(id_counts)
+        print(f"🔑 Unique {target_id_key}s found: {unique_ids}")
         
-        # Show top duplicated IDs
-        print("\n🔥 Top Duplicated Records:")
-        print(df['event_id'].value_counts().head(5))
-        
-except Exception as e:
-    print(f"Error processing file: {e}")
-    print("If it's an NDJSON (JSON Lines) file, try reading line-by-line instead.")
+        # Check if the same ID shows up an absurd number of times
+        print(f"\n🔥 Top Duplicated {target_id_key}s:")
+        for item, count in id_counts.most_common(5):
+            print(f"   ID: {item} -> appears {count} times")
+    else:
+        print(f"\n⚠️ Note: Key '{target_id_key}' not found in the records.")
+        # Print keys of the first record so you can see what fields exist
+        if total_records > 0:
+            print(f"Available keys in your data: {list(data[0].keys())}")
+else:
+    print("The JSON file is a single dictionary block, not a list of records.")
