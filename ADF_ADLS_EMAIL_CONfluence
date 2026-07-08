@@ -1,47 +1,50 @@
 import json
 from collections import Counter
 
-# Update this to match your local filename exactly
-file_path = "your_file.json"
+file_path = r"C:\Users\B135388\adhoc-code\archive_000000.0000.d53ae85f-81be-4ca0-86df-c77afabeaace.json"
 
-print("⏳ Reading and parsing file... please wait...")
+print("⏳ Deep diving into Datadog log attributes... please wait...")
 
 try:
-    # Try reading as a standard single JSON array/file
     with open(file_path, "r") as f:
         data = json.load(f)
 except json.JSONDecodeError:
-    # If that fails, read it as a JSON Lines / NDJSON file (line-by-line)
     data = []
     with open(file_path, "r") as f:
         for line in f:
             if line.strip():
                 data.append(json.loads(line))
 
-# Handle list of records
 if isinstance(data, list):
     total_records = len(data)
     print(f"\n📊 Total Records in File: {total_records}")
     
-    # Let's count keys to check for duplicates
-    # Replace 'player_id' or 'event_id' with whatever unique key your data uses
-    target_id_key = "player_id" 
-    
-    ids = [str(record.get(target_id_key)) for record in data if target_id_key in record]
-    
-    if ids:
-        id_counts = Counter(ids)
+    # 1. Check for Duplicate Log IDs (_id)
+    log_ids = [str(record.get("_id")) for record in data if "_id" in record]
+    if log_ids:
+        id_counts = Counter(log_ids)
         unique_ids = len(id_counts)
-        print(f"🔑 Unique {target_id_key}s found: {unique_ids}")
+        print(f"🔑 Unique Log IDs (_id): {unique_ids}")
+        print(f"🔄 Duplicate Log Count: {total_records - unique_ids}")
         
-        # Check if the same ID shows up an absurd number of times
-        print(f"\n🔥 Top Duplicated {target_id_key}s:")
-        for item, count in id_counts.most_common(5):
-            print(f"   ID: {item} -> appears {count} times")
+        if total_records - unique_ids > 0:
+            print("⚠️ ALERT: Exact same log entries are duplicated inside this raw file!")
+    
+    # 2. Look inside the 'attributes' dictionary for keys
+    print("\n🔍 Checking nested keys inside 'attributes':")
+    sample_attributes = data[0].get("attributes", {})
+    if isinstance(sample_attributes, dict):
+        print(f"Available nested keys: {list(sample_attributes.keys())}")
+        
+        # Let's see if there's a player or customer key in there
+        # If you see your specific player key in the list above, swap it here:
+        nested_target = "player_id" 
+        
+        if nested_target in sample_attributes:
+            nested_ids = [str(record.get("attributes", {}).get(nested_target)) for record in data]
+            nested_counts = Counter(nested_ids)
+            print(f"\n🔥 Top Duplicated {nested_target}s inside attributes:")
+            for item, count in nested_counts.most_common(5):
+                print(f"   {nested_target}: {item} -> appears {count} times")
     else:
-        print(f"\n⚠️ Note: Key '{target_id_key}' not found in the records.")
-        # Print keys of the first record so you can see what fields exist
-        if total_records > 0:
-            print(f"Available keys in your data: {list(data[0].keys())}")
-else:
-    print("The JSON file is a single dictionary block, not a list of records.")
+        print(" 'attributes' field is not a dictionary nested block.")
