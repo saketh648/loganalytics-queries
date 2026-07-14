@@ -1,40 +1,25 @@
-import json
-from collections import Counter
+{
+    "type": "object",
+    "properties": {
+        "pipelineName": { "type": "string" },
+        "runId": { "type": "string" },
+        "status": { "type": "string" },
+        "errorMessage": { "type": "string" },
+        "recipientEmail": { "type": "string" }
+    },
+    "required": ["pipelineName", "runId", "status", "recipientEmail"]
+}
 
-file_path = r"C:\Users\B135388\adhoc-code\archive_000000.0000.d53ae85f-81be-4ca0-86df-c77afabeaace.json"
 
-try:
-    with open(file_path, "r") as f:
-        data = json.load(f)
-except json.JSONDecodeError:
-    data = []
-    with open(file_path, "r") as f:
-        for line in f:
-            if line.strip():
-                data.append(json.loads(line))
+Pipeline @{triggerBody()?['pipelineName']} - @{triggerBody()?['status']}⁠
 
-if isinstance(data, list):
-    # Let's inspect 't2_x_request_id' inside attributes
-    req_ids = []
-    null_or_missing_count = 0
-    
-    for record in data:
-        attrs = record.get("attributes", {})
-        if isinstance(attrs, dict):
-            req_id = attrs.get("t2_x_request_id")
-            if req_id:
-                req_ids.append(str(req_id))
-            else:
-                null_or_missing_count += 1
-        else:
-            null_or_missing_count += 1
-            
-    print(f"🆔 Total t2_x_request_ids found: {len(req_ids)}")
-    print(f"⚪ Missing/Null t2_x_request_ids: {null_or_missing_count}")
-    
-    if req_ids:
-        req_counts = Counter(req_ids)
-        print(f"🧩 Unique t2_x_request_ids: {len(req_counts)}")
-        print("\n🔥 Top Repeated t2_x_request_ids (Possible Join Exploders):")
-        for item, count in req_counts.most_common(5):
-            print(f"   ID: {item} -> appears {count} times")
+
+
+
+{
+    "pipelineName": "@pipeline().Pipeline",
+    "runId": "@pipeline().RunId",
+    "status": "Failed", 
+    "errorMessage": "@activity('YourPreviousActivityName').Error?.message",
+    "recipientEmail": "your-email@domain.com"
+}
