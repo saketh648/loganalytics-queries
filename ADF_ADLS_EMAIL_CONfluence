@@ -1,4 +1,20 @@
 {
+    "DatafactoryName": "@{pipeline().DataFactory}",
+    "SourcePipelineName": "@{pipeline().Pipeline}",
+    "SourceRunId": "@{pipeline().RunId}",
+    "Status": "@{if(equals(activity('YourActivityName').Status, 'Succeeded'), 'Success', 'Failed')}",
+    "ExecutionTime": "@{pipeline().TriggerTime}",
+    "Duration": "@{concat(string(div(div(sub(ticks(utcnow()), ticks(pipeline().TriggerTime)), 10000000), 60)), 'm ', string(mod(div(sub(ticks(utcnow()), ticks(pipeline().TriggerTime)), 10000000), 60)), 's')}",
+    "TeamName": "Special_projects",
+    "Message": "Please check pipeline activity logs for details",
+    "Recipients": "person1@company.com;person2@company.com"
+}
+
+
+
+
+
+{
     "definition": {
         "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
         "contentVersion": "1.0.0.0",
