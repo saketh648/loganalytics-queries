@@ -2,6 +2,137 @@
     "definition": {
         "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
         "contentVersion": "1.0.0.0",
+        "parameters": {},
+        "triggers": {
+            "When_an_HTTP_request_is_received": {
+                "type": "Request",
+                "kind": "Http",
+                "inputs": {
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "DatafactoryName": {
+                                "type": "string",
+                                "description": "Name of the Azure Data Factory instance"
+                            },
+                            "SourcePipelineName": {
+                                "type": "string",
+                                "description": "Name of the pipeline that triggered this notification"
+                            },
+                            "RunId": {
+                                "type": "string",
+                                "description": "ADF pipeline run ID"
+                            },
+                            "Status": {
+                                "type": "string",
+                                "enum": ["Success", "Failed", "Warning"],
+                                "description": "Outcome of the pipeline run"
+                            },
+                            "ExecutionTime": {
+                                "type": "string",
+                                "description": "Start time of the pipeline run"
+                            },
+                            "Duration": {
+                                "type": "string",
+                                "description": "Elapsed run time, e.g. '12m 43s'"
+                            },
+                            "TeamName": {
+                                "type": "string",
+                                "description": "Owning team for routing/escalation"
+                            },
+                            "Message": {
+                                "type": "string",
+                                "description": "Free-text detail, e.g. error message or row counts"
+                            },
+                            "Recipients": {
+                                "type": "string",
+                                "description": "Semicolon-separated list of email addresses"
+                            },
+                            "AdfPortalUrl": {
+                                "type": "string",
+                                "description": "Optional deep link to the pipeline run in the ADF monitoring UI"
+                            }
+                        },
+                        "required": [
+                            "DatafactoryName",
+                            "SourcePipelineName",
+                            "RunId",
+                            "Status",
+                            "Recipients"
+                        ]
+                    }
+                }
+            }
+        },
+        "actions": {
+            "Initialize_StatusColor": {
+                "type": "InitializeVariable",
+                "inputs": {
+                    "variables": [
+                        {
+                            "name": "StatusColor",
+                            "type": "string",
+                            "value": "@if(equals(triggerBody()?['Status'], 'Success'), '#107C10', if(equals(triggerBody()?['Status'], 'Warning'), '#B25F00', '#A80000'))"
+                        }
+                    ]
+                },
+                "runAfter": {}
+            },
+            "Initialize_StatusIcon": {
+                "type": "InitializeVariable",
+                "inputs": {
+                    "variables": [
+                        {
+                            "name": "StatusIcon",
+                            "type": "string",
+                            "value": "@if(equals(triggerBody()?['Status'], 'Success'), '&#9989;', if(equals(triggerBody()?['Status'], 'Warning'), '&#9888;', '&#10060;'))"
+                        }
+                    ]
+                },
+                "runAfter": {
+                    "Initialize_StatusColor": ["Succeeded"]
+                }
+            },
+            "Send_an_email_(V2)": {
+                "type": "ApiConnection",
+                "inputs": {
+                    "host": {
+                        "connection": {
+                            "referenceName": "office365"
+                        }
+                    },
+                    "method": "post",
+                    "path": "/v2/Mail",
+                    "body": {
+                        "To": "@triggerBody()?['Recipients']",
+                        "Subject": "@{concat('[', triggerBody()?['Status'], '] ADF Pipeline - ', triggerBody()?['SourcePipelineName'])}",
+                        "Importance": "@if(equals(triggerBody()?['Status'], 'Failed'), 'High', 'Normal')",
+                        "Body": "<div style=\"font-family:'Segoe UI',Arial,sans-serif;max-width:640px;margin:auto;border:1px solid #e1e1e1;border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.08);\"><div style=\"background-color:@{variables('StatusColor')};padding:18px 24px;color:#ffffff;\"><table style=\"width:100%;border-collapse:collapse;\"><tr><td style=\"font-size:22px;vertical-align:middle;\">@{variables('StatusIcon')}</td><td style=\"padding-left:10px;vertical-align:middle;\"><div style=\"font-size:16px;font-weight:600;\">@{triggerBody()?['Status']} &mdash; @{triggerBody()?['SourcePipelineName']}</div><div style=\"font-size:12px;opacity:0.9;margin-top:2px;\">Azure Data Factory Notification</div></td></tr></table></div><div style=\"padding:22px 24px;background-color:#ffffff;\"><table style=\"width:100%;border-collapse:collapse;font-size:13px;\"><tr><td style=\"padding:9px 10px;background-color:#f7f7f8;border:1px solid #ececec;font-weight:600;width:38%;color:#333;\">Data Factory</td><td style=\"padding:9px 10px;border:1px solid #ececec;color:#333;\">@{triggerBody()?['DatafactoryName']}</td></tr><tr><td style=\"padding:9px 10px;border:1px solid #ececec;font-weight:600;color:#333;\">Team</td><td style=\"padding:9px 10px;border:1px solid #ececec;color:#333;\">@{coalesce(triggerBody()?['TeamName'], 'N/A')}</td></tr><tr><td style=\"padding:9px 10px;background-color:#f7f7f8;border:1px solid #ececec;font-weight:600;color:#333;\">Run ID</td><td style=\"padding:9px 10px;border:1px solid #ececec;font-family:Consolas,monospace;font-size:12px;color:#333;\">@{triggerBody()?['RunId']}</td></tr><tr><td style=\"padding:9px 10px;border:1px solid #ececec;font-weight:600;color:#333;\">Started</td><td style=\"padding:9px 10px;border:1px solid #ececec;color:#333;\">@{coalesce(triggerBody()?['ExecutionTime'], 'N/A')}</td></tr><tr><td style=\"padding:9px 10px;background-color:#f7f7f8;border:1px solid #ececec;font-weight:600;color:#333;\">Duration</td><td style=\"padding:9px 10px;border:1px solid #ececec;color:#333;\">@{coalesce(triggerBody()?['Duration'], 'N/A')}</td></tr><tr><td style=\"padding:9px 10px;border:1px solid #ececec;font-weight:600;vertical-align:top;color:#333;\">Message</td><td style=\"padding:9px 10px;border:1px solid #ececec;color:#333;\">@{coalesce(triggerBody()?['Message'], 'No additional details provided.')}</td></tr></table>@{if(empty(triggerBody()?['AdfPortalUrl']), '', concat('<div style=\"margin-top:20px;text-align:center;\"><a href=\"', triggerBody()?['AdfPortalUrl'], '\" style=\"background-color:', variables('StatusColor'), ';color:#ffffff;text-decoration:none;padding:10px 22px;border-radius:5px;font-size:13px;font-weight:600;display:inline-block;\">View Pipeline Run</a></div>'))}</div><div style=\"padding:12px 24px;background-color:#fafafa;border-top:1px solid #ececec;font-size:11px;color:#9a9a9a;text-align:center;\">Automated message &middot; Do not reply directly to this email</div></div>"
+                    }
+                },
+                "runAfter": {
+                    "Initialize_StatusIcon": ["Succeeded"]
+                }
+            }
+        },
+        "outputs": {}
+    }
+}
+
+
+
+
+
+
+
+
+
+
+
+{
+    "definition": {
+        "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+        "contentVersion": "1.0.0.0",
         "actions": {
             "Send_an_email_(V2)": {
                 "type": "ApiConnection",
