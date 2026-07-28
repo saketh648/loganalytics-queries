@@ -1,5 +1,8 @@
 {
   "fileName": "@{pipeline().parameters.FileName}",
-  "Recipients": "@{pipeline().parameters.Recipients}",
-  "fileContent": "@{activity('GetFileContent').output.payload}"
+  "emailTo": "",
+  "fileContent": {
+    "content-type": "application/octet-stream",
+    "$content": "@{base64(string(activity('GetFileContent').output.Response))}"
+  }
 }
