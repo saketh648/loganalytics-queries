@@ -53,6 +53,71 @@
         }
       }
     }
+  },
+  "outputs": {}
+}
+
+
+
+
+
+
+
+{
+  "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {},
+  "triggers": {
+    "manual": {
+      "type": "Request",
+      "kind": "Http",
+      "inputs": {
+        "schema": {
+          "type": "object",
+          "properties": {
+            "fileName": {
+              "type": "string"
+            },
+            "fileContent": {
+              "type": "string"
+            },
+            "recipientEmail": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "fileName",
+            "fileContent",
+            "recipientEmail"
+          ]
+        }
+      }
+    }
+  },
+  "actions": {
+    "Send_an_email_(V2)": {
+      "type": "ApiConnection",
+      "inputs": {
+        "host": {
+          "connection": {
+            "name": "@parameters('$connections')['office365']['connectionId']"
+          }
+        },
+        "method": "post",
+        "path": "/v2/Mail",
+        "body": {
+          "To": "@triggerBody()?['recipientEmail']",
+          "Subject": "@concat('Automated Report File: ', triggerBody()?['fileName'])",
+          "Body": "<p>Hello,<br><br>Please find the requested file attached.<br><br><b>File Name:</b> @{triggerBody()?['fileName']}</p>",
+          "Attachments": [
+            {
+              "Name": "@triggerBody()?['fileName']",
+              "ContentBytes": "@base64ToBinary(triggerBody()?['fileContent'])"
+            }
+          ]
+        }
+      }
+    }
   }
 }
 
