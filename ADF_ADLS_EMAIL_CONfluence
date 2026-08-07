@@ -1,8 +1,9 @@
-{
-  "fileName": "@{pipeline().parameters.FileName}",
-  "emailTo": "",
-  "fileContent": {
-    "content-type": "application/octet-stream",
-    "$content": "@{base64(string(activity('GetFileContent').output.Response))}"
-  }
-}
+SynapseBigDataPoolApplicationsEnded
+| where TimeGenerated >= ago(30d) // Adjust lookback period as needed
+| summarize 
+    TotalApplications = count(),
+    SparkPoolsUsed = make_set(SparkPoolName),
+    FirstSeen = min(TimeGenerated),
+    LastSeen = max(TimeGenerated)
+  by Submitter
+| order by TotalApplications desc
