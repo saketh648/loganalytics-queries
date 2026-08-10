@@ -1,9 +1,4 @@
-SynapseBigDataPoolApplicationsEnded
-| where TimeGenerated >= ago(30d) // Adjust lookback period as needed
-| summarize 
-    TotalApplications = count(),
-    SparkPoolsUsed = make_set(SparkPoolName),
-    FirstSeen = min(TimeGenerated),
-    LastSeen = max(TimeGenerated)
-  by Submitter
-| order by TotalApplications desc
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope Process
+.\venv\Scripts\activate
+
+
