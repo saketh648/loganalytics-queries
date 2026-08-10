@@ -1,43 +1,259 @@
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Login</title>
-    <style>
-        body { font-family: sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; background: #f4f6f8; }
-        .login-card { background: white; padding: 30px; border-radius: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); width: 300px; }
-        input { width: 100%; padding: 10px; margin: 10px 0; box-sizing: border-box; }
-        button { width: 100%; padding: 10px; background: #0078d4; color: white; border: none; border-radius: 4px; cursor: pointer; }
-    </style>
-</head>
-<body>
-    <div class="login-card">
-        <h2>Dashboard Login</h2>
-        <form id="loginForm">
-            <input type="text" id="username" placeholder="Username" required>
-            <input type="password" id="password" placeholder="Password" required>
-            <button type="submit">Log In</button>
-        </form>
-        <p id="error" style="color:red; font-size:12px;"></p>
-    </div>
+import os
+import sqlite3
+import random
+import json
+import uuid
+import base64
+import hashlib
+import urllib.parse
+from http.server import HTTPServer, SimpleHTTPRequestHandler
+from datetime import datetime
 
-    <script>
-        document.getElementById('loginForm').addEventListener('submit', async (e) => {
-            e.preventDefault();
-            const username = document.getElementById('username').value;
-            const password = document.getElementById('password').value;
+# 1. Lock the database path to the folder where app.py lives
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_NAME = os.path.join(BASE_DIR, "dashboard.db")
 
-            const res = await fetch('/api/login', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                body: `username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`
-            });
+# In-memory session tracking: { session_id_cookie: username }
+ACTIVE_SESSIONS = {}
 
-            if (res.ok) {
-                window.location.href = '/';
-            } else {
-                document.getElementById('error').innerText = "Invalid credentials";
-            }
-        });
-    </script>
-</body>
-</html>
+def hash_password(password):
+    return hashlib.sha256(password.encode('utf-8')).hexdigest()
+
+# 2. Database Setup & Initialization
+def init_db():
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS metrics (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            category TEXT NOT NULL,
+            value INTEGER NOT NULL,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS user_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            login_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_activity TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            logout_time TIMESTAMP NULL
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS audit_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL,
+            action TEXT NOT NULL,
+            endpoint TEXT NOT NULL,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+    # Seed default user (admin / adminpassword)
+    cursor.execute('SELECT COUNT(*) FROM users')
+    if cursor.fetchone()[0] == 0:
+        cursor.execute('INSERT INTO users (username, password_hash) VALUES (?, ?)', 
+                       ('admin', hash_password('adminpassword')))
+        print("Default user created: admin / adminpassword", flush=True)
+
+    # Seed initial metrics
+    cursor.execute('SELECT COUNT(*) FROM metrics')
+    if cursor.fetchone()[0] == 0:
+        sample_data = [('Sales', 120), ('Marketing', 85), ('Engineering', 150), ('Support', 65)]
+        cursor.executemany('INSERT INTO metrics (category, value) VALUES (?, ?)', sample_data)
+
+    conn.commit()
+    conn.close()
+
+# 3. HTTP Request Handler
+class DashboardAppHandler(SimpleHTTPRequestHandler):
+
+    def get_session_info(self):
+        cookie_header = self.headers.get('Cookie')
+        if cookie_header:
+            cookies = dict(item.strip().split('=') for item in cookie_header.split(';') if '=' in item)
+            session_id = cookies.get('session_id')
+            if session_id and session_id in ACTIVE_SESSIONS:
+                return session_id, ACTIVE_SESSIONS[session_id]
+        return None, None
+
+    def log_activity(self, username, session_id, action, endpoint):
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+
+        # Log action in audit_logs
+        cursor.execute(
+            'INSERT INTO audit_logs (username, action, endpoint) VALUES (?, ?, ?)',
+            (username, action, endpoint)
+        )
+
+        # Update last active time for the specific session
+        cursor.execute('''
+            UPDATE user_sessions 
+            SET last_activity = CURRENT_TIMESTAMP 
+            WHERE session_id = ? AND logout_time IS NULL
+        ''', (session_id,))
+
+        conn.commit()
+        conn.close()
+
+    def do_GET(self):
+        session_id, username = self.get_session_info()
+
+        # Unauthenticated users accessing protected routes get redirected to /login.html
+        if not username and self.path not in ['/login.html', '/api/login']:
+            self.send_response(302)
+            self.send_header('Location', '/login.html')
+            self.end_headers()
+            return
+
+        # Serve Dashboard API Data
+        if self.path == '/api/metrics':
+            self.log_activity(username, session_id, "FETCH_METRICS", self.path)
+
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+
+            conn = sqlite3.connect(DB_NAME)
+            cursor = conn.cursor()
+            cursor.execute('SELECT category, value, updated_at FROM metrics')
+            rows = cursor.fetchall()
+            conn.close()
+
+            data = [{"category": row[0], "value": row[1], "updated_at": row[2]} for row in rows]
+            response = {"timestamp": datetime.now().strftime("%I:%M:%S %p"), "data": data}
+            self.wfile.write(json.dumps(response).encode('utf-8'))
+        else:
+            if self.path == '/' or self.path == '/index.html':
+                if username:
+                    self.log_activity(username, session_id, "VIEW_DASHBOARD", self.path)
+                self.path = '/index.html'
+            return super().do_GET()
+
+    def do_POST(self):
+        length = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(length).decode('utf-8')
+
+        # Handle Login Submission
+        if self.path == '/api/login':
+            params = urllib.parse.parse_qs(body)
+            username = params.get('username', [''])[0]
+            password = params.get('password', [''])[0]
+
+            conn = sqlite3.connect(DB_NAME)
+            cursor = conn.cursor()
+            cursor.execute('SELECT password_hash FROM users WHERE username = ?', (username,))
+            row = cursor.fetchone()
+
+            if row and row[0] == hash_password(password):
+                # Create session ID
+                session_id = str(uuid.uuid4())
+                ACTIVE_SESSIONS[session_id] = username
+
+                # Record login session in SQLite
+                cursor.execute(
+                    'INSERT INTO user_sessions (username, session_id) VALUES (?, ?)',
+                    (username, session_id)
+                )
+                
+                # Log login event
+                cursor.execute(
+                    'INSERT INTO audit_logs (username, action, endpoint) VALUES (?, ?, ?)',
+                    (username, 'USER_LOGIN', '/api/login')
+                )
+                conn.commit()
+                conn.close()
+
+                # Set session cookie
+                self.send_response(200)
+                self.send_header('Set-Cookie', f'session_id={session_id}; Path=/; HttpOnly')
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "success"}).encode('utf-8'))
+            else:
+                conn.close()
+                self.send_response(401)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": "Invalid credentials"}).encode('utf-8'))
+
+        # Handle Logout Action
+        elif self.path == '/api/logout':
+            session_id, username = self.get_session_info()
+            if session_id:
+                # Remove from active sessions
+                ACTIVE_SESSIONS.pop(session_id, None)
+
+                # Mark logout time in SQLite
+                conn = sqlite3.connect(DB_NAME)
+                cursor = conn.cursor()
+                cursor.execute('''
+                    UPDATE user_sessions 
+                    SET logout_time = CURRENT_TIMESTAMP 
+                    WHERE session_id = ?
+                ''', (session_id,))
+                
+                cursor.execute(
+                    'INSERT INTO audit_logs (username, action, endpoint) VALUES (?, ?, ?)',
+                    (username, 'USER_LOGOUT', '/api/logout')
+                )
+                conn.commit()
+                conn.close()
+
+            # Clear session cookie in browser
+            self.send_response(200)
+            self.send_header('Set-Cookie', 'session_id=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT')
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({"status": "success"}).encode('utf-8'))
+
+        # Handle Simulate DB Update
+        elif self.path == '/api/simulate-update':
+            session_id, username = self.get_session_info()
+            if not username:
+                self.send_response(401)
+                self.end_headers()
+                return
+
+            self.log_activity(username, session_id, "SIMULATE_DB_UPDATE", self.path)
+
+            conn = sqlite3.connect(DB_NAME)
+            cursor = conn.cursor()
+            cursor.execute('SELECT id, value FROM metrics')
+            rows = cursor.fetchall()
+
+            for row in rows:
+                random_change = random.randint(-10, 20)
+                new_val = max(10, row[1] + random_change)
+                cursor.execute('UPDATE metrics SET value = ? WHERE id = ?', (new_val, row[0]))
+
+            conn.commit()
+            conn.close()
+
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({"status": "success"}).encode('utf-8'))
+
+
+# 4. Main Execution Block
+if __name__ == '__main__':
+    init_db()
+    server_address = ('', 8000)
+    httpd = HTTPServer(server_address, DashboardAppHandler)
+    print("Server running at http://localhost:8000 ... Press Ctrl+C to stop.", flush=True)
+    httpd.serve_forever()
