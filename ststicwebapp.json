@@ -1,195 +1,93 @@
-import sqlite3
-import random
-import json
-import os
-from http.server import HTTPServer, SimpleHTTPRequestHandler
-from datetime import datetime
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pure Python Database Dashboard</title>
+    <!-- Chart.js CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f4f6f8; margin: 40px; color: #333; }
+        .card { background: white; padding: 25px; border-radius: 10px; max-width: 700px; margin: 0 auto; box-shadow: 0 4px 12px rgba(0,0,0,0.08); }
+        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+        .btn { background: #0078d4; color: white; border: none; padding: 10px 18px; border-radius: 6px; font-weight: bold; cursor: pointer; transition: background 0.2s; }
+        .btn:hover { background: #005a9e; }
+        .btn-secondary { background: #6c757d; margin-left: 8px; }
+        .status { font-size: 13px; color: #666; margin-top: 15px; text-align: right; }
+        .chart-container { position: relative; height: 320px; width: 100%; }
+    </style>
+</head>
+<body>
 
-DB_NAME = "dashboard.db"
+    <div class="card">
+        <div class="header">
+            <h2>Standard Python + SQLite Dashboard</h2>
+            <div>
+                <button class="btn" onclick="fetchDashboardData()">↻ Refresh Data</button>
+                <button class="btn btn-secondary" onclick="simulateDBChange()">⚡ Simulate DB Change</button>
+            </div>
+        </div>
 
-# 1. Initialize SQLite Database (Built-in)
-def init_db():
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS metrics (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            category TEXT NOT NULL,
-            value INTEGER NOT NULL,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    
-    cursor.execute('SELECT COUNT(*) as count FROM metrics')
-    if cursor.fetchone()[0] == 0:
-        sample_data = [
-            ('Sales', 120),
-            ('Marketing', 85),
-            ('Engineering', 150),
-            ('Support', 65)
-        ]
-        cursor.executemany('INSERT INTO metrics (category, value) VALUES (?, ?)', sample_data)
-        conn.commit()
-        print("Sample database created successfully!")
-    conn.close()
+        <div class="chart-container">
+            <canvas id="metricsChart"></canvas>
+        </div>
 
-# 2. Custom HTTP Handler using Python's built-in http.server
-class DashboardRequestHandler(SimpleHTTPRequestHandler):
-    
-    # Handle GET requests (Serving HTML & API endpoints)
-    def do_GET(self):
-        if self.path == '/api/metrics':
-            self.send_response(200)
-            self.send_header('Content-type', 'application/json')
-            self.end_headers()
-            
-            conn = sqlite3.connect(DB_NAME)
-            cursor = conn.cursor()
-            cursor.execute('SELECT category, value, updated_at FROM metrics')
-            rows = cursor.fetchall()
-            conn.close()
-            
-            data = [{"category": row[0], "value": row[1], "updated_at": row[2]} for row in rows]
-            response = {
-                "timestamp": datetime.now().strftime("%I:%M:%S %p"),
-                "data": data
+        <div class="status" id="last-updated">Last refreshed: Never</div>
+    </div>
+
+    <script>
+        let myChart = null;
+
+        async function fetchDashboardData() {
+            try {
+                const response = await fetch('/api/metrics');
+                const result = await response.json();
+
+                const labels = result.data.map(item => item.category);
+                const values = result.data.map(item => item.value);
+
+                document.getElementById('last-updated').innerText = `Last refreshed: ${result.timestamp}`;
+
+                if (myChart) {
+                    myChart.data.labels = labels;
+                    myChart.data.datasets[0].data = values;
+                    myChart.update();
+                } else {
+                    renderChart(labels, values);
+                }
+            } catch (err) {
+                console.error("Error loading metrics:", err);
             }
-            self.wfile.write(json.dumps(response).encode('utf-8'))
-        else:
-            # Serve regular static HTML file
-            if self.path == '/':
-                self.path = '/index.html'
-            return super().do_GET()
+        }
 
-    # Handle POST requests (Simulating database updates)
-    def do_POST(self):
-        if self.path == '/api/simulate-update':
-            conn = sqlite3.connect(DB_NAME)
-            cursor = conn.cursor()
-            cursor.execute('SELECT id, value FROM metrics')
-            rows = cursor.fetchall()
-            
-            for row in rows:
-                random_change = random.randint(-10, 20)
-                new_val = max(10, row[1] + random_change)
-                cursor.execute('UPDATE metrics SET value = ? WHERE id = ?', (new_val, row[0]))
-            
-            conn.commit()
-            conn.close()
-            
-            self.send_response(200)
-            self.send_header('Content-type', 'application/json')
-            self.end_headers()
-            self.wfile.write(json.dumps({"status": "success"}).encode('utf-8'))
+        function renderChart(labels, values) {
+            const ctx = document.getElementById('metricsChart').getContext('2d');
+            myChart = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: 'Department Metrics (Built-in Python)',
+                        data: values,
+                        backgroundColor: ['#0078d4', '#28a745', '#ffc107', '#dc3545'],
+                        borderRadius: 6
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: { y: { beginAtZero: true } }
+                }
+            });
+        }
 
-if __name__ == '__main__':
-    init_db()
-    server_address = ('', 8000)
-    httpd = HTTPServer(server_address, DashboardRequestHandler)
-    print("Server running at http://localhost:8000 (No Flask required!)")
-    httpd.serve_forever()
+        async function simulateDBChange() {
+            await fetch('/api/simulate-update', { method: 'POST' });
+            fetchDashboardData();
+        }
 
-
-
-
-
-
-
-
-
-import sqlite3
-import random
-import json
-import os
-from http.server import HTTPServer, SimpleHTTPRequestHandler
-from datetime import datetime
-
-DB_NAME = "dashboard.db"
-
-# 1. Initialize SQLite Database (Built-in)
-def init_db():
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS metrics (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            category TEXT NOT NULL,
-            value INTEGER NOT NULL,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    
-    cursor.execute('SELECT COUNT(*) as count FROM metrics')
-    if cursor.fetchone()[0] == 0:
-        sample_data = [
-            ('Sales', 120),
-            ('Marketing', 85),
-            ('Engineering', 150),
-            ('Support', 65)
-        ]
-        cursor.executemany('INSERT INTO metrics (category, value) VALUES (?, ?)', sample_data)
-        conn.commit()
-        print("Sample database created successfully!")
-    conn.close()
-
-# 2. Custom HTTP Handler using Python's built-in http.server
-class DashboardRequestHandler(SimpleHTTPRequestHandler):
-    
-    # Handle GET requests (Serving HTML & API endpoints)
-    def do_GET(self):
-        if self.path == '/api/metrics':
-            self.send_response(200)
-            self.send_header('Content-type', 'application/json')
-            self.end_headers()
-            
-            conn = sqlite3.connect(DB_NAME)
-            cursor = conn.cursor()
-            cursor.execute('SELECT category, value, updated_at FROM metrics')
-            rows = cursor.fetchall()
-            conn.close()
-            
-            data = [{"category": row[0], "value": row[1], "updated_at": row[2]} for row in rows]
-            response = {
-                "timestamp": datetime.now().strftime("%I:%M:%S %p"),
-                "data": data
-            }
-            self.wfile.write(json.dumps(response).encode('utf-8'))
-        else:
-            # Serve regular static HTML file
-            if self.path == '/':
-                self.path = '/index.html'
-            return super().do_GET()
-
-    # Handle POST requests (Simulating database updates)
-    def do_POST(self):
-        if self.path == '/api/simulate-update':
-            conn = sqlite3.connect(DB_NAME)
-            cursor = conn.cursor()
-            cursor.execute('SELECT id, value FROM metrics')
-            rows = cursor.fetchall()
-            
-            for row in rows:
-                random_change = random.randint(-10, 20)
-                new_val = max(10, row[1] + random_change)
-                cursor.execute('UPDATE metrics SET value = ? WHERE id = ?', (new_val, row[0]))
-            
-            conn.commit()
-            conn.close()
-            
-            self.send_response(200)
-            self.send_header('Content-type', 'application/json')
-            self.end_headers()
-            self.wfile.write(json.dumps({"status": "success"}).encode('utf-8'))
-
-if __name__ == '__main__':
-    init_db()
-    server_address = ('', 8000)
-    httpd = HTTPServer(server_address, DashboardRequestHandler)
-    print("Server running at http://localhost:8000 (No Flask required!)")
-    httpd.serve_forever()
-
-
-
-
-
-python app.py
+        // Initial Load
+        fetchDashboardData();
+    </script>
+</body>
+</html>
