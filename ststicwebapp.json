@@ -58,3 +58,46 @@ def init_db():
 
     conn.commit()
     conn.close()
+
+
+
+
+
+import sqlite3
+
+DB_NAME = "dashboard.db"
+
+def show_audit_report():
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+
+    print("\n--- USER SESSIONS & DURATION ---")
+    cursor.execute('''
+        SELECT 
+            username,
+            login_time,
+            last_activity,
+            ROUND((JULIANDAY(last_activity) - JULIANDAY(login_time)) * 86400, 2) AS duration_seconds
+        FROM user_sessions
+        ORDER BY login_time DESC
+    ''')
+    sessions = cursor.fetchall()
+    
+    for row in sessions:
+        print(f"User: {row[0]} | Logged In: {row[1]} | Last Active: {row[2]} | Duration: {row[3]} seconds")
+
+    print("\n--- RECENT AUDIT LOGS ---")
+    cursor.execute('''
+        SELECT username, action, endpoint, timestamp 
+        FROM audit_logs 
+        ORDER BY timestamp DESC LIMIT 10
+    ''')
+    logs = cursor.fetchall()
+    
+    for log in logs:
+        print(f"[{log[3]}] User: {log[0]} | Action: {log[1]} ({log[2]})")
+
+    conn.close()
+
+if __name__ == '__main__':
+    show_audit_report()
