@@ -2,156 +2,39 @@ import os
 import sqlite3
 import random
 import json
-import base64
-import hashlib
+import uuid
+import urllib.parse
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from datetime import datetime
 
-# 1. Lock database path to app's directory
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_NAME = os.path.join(BASE_DIR, "dashboard.db")
 
-def hash_password(password):
-    return hashlib.sha256(password.encode('utf-8')).hexdigest()
+# Active session tokens in memory: { session_cookie_id: username }
+ACTIVE_SESSIONS = {}
 
-# 2. Database Initialization
-def init_db():
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
+class FormAuthHandler(SimpleHTTPRequestHandler):
 
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS metrics (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            category TEXT NOT NULL,
-            value INTEGER NOT NULL,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL
-        )
-    ''')
-
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS user_sessions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT NOT NULL,
-            login_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            last_activity TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            logout_time TIMESTAMP NULL
-        )
-    ''')
-
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS audit_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT NOT NULL,
-            action TEXT NOT NULL,
-            endpoint TEXT NOT NULL,
-            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-
-    # Seed default admin user
-    cursor.execute('SELECT COUNT(*) FROM users')
-    if cursor.fetchone()[0] == 0:
-        cursor.execute('INSERT INTO users (username, password_hash) VALUES (?, ?)', 
-                       ('admin', hash_password('adminpassword')))
-        print("Created default user: admin / adminpassword", flush=True)
-
-    # Seed initial metrics
-    cursor.execute('SELECT COUNT(*) FROM metrics')
-    if cursor.fetchone()[0] == 0:
-        sample_data = [('Sales', 120), ('Marketing', 85), ('Engineering', 150), ('Support', 65)]
-        cursor.executemany('INSERT INTO metrics (category, value) VALUES (?, ?)', sample_data)
-
-    conn.commit()
-    conn.close()
-
-# 3. HTTP Request Handler
-class AuthenticatedDashboardHandler(SimpleHTTPRequestHandler):
-
-    def authenticate(self):
-        auth_header = self.headers.get('Authorization')
-        if not auth_header:
-            return None
-
-        try:
-            auth_type, encoded = auth_header.split(' ', 1)
-            if auth_type.lower() != 'basic':
-                return None
-
-            decoded = base64.b64decode(encoded).decode('utf-8')
-            username, password = decoded.split(':', 1)
-
-            conn = sqlite3.connect(DB_NAME)
-            cursor = conn.cursor()
-            cursor.execute('SELECT password_hash FROM users WHERE username = ?', (username,))
-            row = cursor.fetchone()
-            conn.close()
-
-            if row and row[0] == hash_password(password):
-                return username
-        except Exception:
-            return None
-
+    def get_session_user(self):
+        # Extract cookie from request headers
+        cookie_header = self.headers.get('Cookie')
+        if cookie_header:
+            cookies = dict(item.strip().split('=') for item in cookie_header.split(';') if '=' in item)
+            session_id = cookies.get('session_id')
+            return ACTIVE_SESSIONS.get(session_id)
         return None
 
-    def send_auth_prompt(self):
-        self.send_response(401)
-        # Using V2 realm forces the browser to prompt for login again
-        self.send_header('WWW-Authenticate', 'Basic realm="Dashboard Login V2"')
-        self.send_header('Content-type', 'text/html')
-        self.end_headers()
-        self.wfile.write(b"401 Unauthorized: Access denied.")
-
-    def log_activity(self, username, action, endpoint):
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
-
-        # Insert entry into audit_logs
-        cursor.execute(
-            'INSERT INTO audit_logs (username, action, endpoint) VALUES (?, ?, ?)',
-            (username, action, endpoint)
-        )
-
-        # Check for active session
-        cursor.execute('''
-            SELECT id FROM user_sessions 
-            WHERE username = ? AND logout_time IS NULL 
-            ORDER BY login_time DESC LIMIT 1
-        ''', (username,))
-        session = cursor.fetchone()
-
-        if session:
-            cursor.execute('''
-                UPDATE user_sessions 
-                SET last_activity = CURRENT_TIMESTAMP 
-                WHERE id = ?
-            ''', (session[0],))
-        else:
-            cursor.execute(
-                'INSERT INTO user_sessions (username) VALUES (?)',
-                (username,)
-            )
-
-        conn.commit()  # Committing changes to SQLite
-        conn.close()
-        print(f"[AUDIT LOG] {username} -> {action} ({endpoint})", flush=True)
-
     def do_GET(self):
-        username = self.authenticate()
-        if not username:
-            self.send_auth_prompt()
+        username = self.get_session_user()
+
+        # If user is NOT logged in and trying to access protected routes, redirect to login page
+        if not username and self.path not in ['/login.html', '/api/login']:
+            self.send_response(302)
+            self.send_header('Location', '/login.html')
+            self.end_headers()
             return
 
         if self.path == '/api/metrics':
-            self.log_activity(username, "FETCH_METRICS", self.path)
-
             self.send_response(200)
             self.send_header('Content-type', 'application/json')
             self.end_headers()
@@ -166,41 +49,53 @@ class AuthenticatedDashboardHandler(SimpleHTTPRequestHandler):
             response = {"timestamp": datetime.now().strftime("%I:%M:%S %p"), "data": data}
             self.wfile.write(json.dumps(response).encode('utf-8'))
         else:
-            if self.path == '/' or self.path == '/index.html':
-                self.log_activity(username, "VIEW_DASHBOARD", self.path)
+            if self.path == '/':
                 self.path = '/index.html'
             return super().do_GET()
 
     def do_POST(self):
-        username = self.authenticate()
-        if not username:
-            self.send_auth_prompt()
-            return
+        length = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(length).decode('utf-8')
 
-        if self.path == '/api/simulate-update':
-            self.log_activity(username, "SIMULATE_DB_UPDATE", self.path)
+        if self.path == '/api/login':
+            params = urllib.parse.parse_qs(body)
+            username = params.get('username', [''])[0]
+            password = params.get('password', [''])[0]
 
-            conn = sqlite3.connect(DB_NAME)
-            cursor = conn.cursor()
-            cursor.execute('SELECT id, value FROM metrics')
-            rows = cursor.fetchall()
+            # Simple credential check (or check against SQLite users table)
+            if username == 'admin' and password == 'adminpassword':
+                # Generate unique session ID
+                session_id = str(uuid.uuid4())
+                ACTIVE_SESSIONS[session_id] = username
 
-            for row in rows:
-                random_change = random.randint(-10, 20)
-                new_val = max(10, row[1] + random_change)
-                cursor.execute('UPDATE metrics SET value = ? WHERE id = ?', (new_val, row[0]))
+                # Record login session in SQLite
+                conn = sqlite3.connect(DB_NAME)
+                cursor = conn.cursor()
+                cursor.execute('INSERT INTO user_sessions (username) VALUES (?)', (username,))
+                conn.commit()
+                conn.close()
 
-            conn.commit()
-            conn.close()
+                # Send response with HTTP-Only Session Cookie
+                self.send_response(200)
+                self.send_header('Set-Cookie', f'session_id={session_id}; Path=/; HttpOnly')
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "success", "redirect": "/"}).encode('utf-8'))
+            else:
+                self.send_response(401)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": "Invalid username or password"}).encode('utf-8'))
 
+        elif self.path == '/api/logout':
+            cookie_header = self.headers.get('Cookie')
+            if cookie_header:
+                cookies = dict(item.strip().split('=') for item in cookie_header.split(';') if '=' in item)
+                session_id = cookies.get('session_id')
+                if session_id in ACTIVE_SESSIONS:
+                    del ACTIVE_SESSIONS[session_id]
+
+            # Clear cookie in browser
             self.send_response(200)
-            self.send_header('Content-type', 'application/json')
+            self.send_header('Set-Cookie', 'session_id=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT')
             self.end_headers()
-            self.wfile.write(json.dumps({"status": "success"}).encode('utf-8'))
-
-if __name__ == '__main__':
-    init_db()
-    server_address = ('', 8000)
-    httpd = HTTPServer(server_address, AuthenticatedDashboardHandler)
-    print("Server running at http://localhost:8000 ... Press Ctrl+C to stop.", flush=True)
-    httpd.serve_forever()
