@@ -1,148 +1,195 @@
-{
-  "navigationFallback": {
-    "rewrite": "/index.html"
-  },
-  "routes": [
-    {
-      "route": "/admin/*",
-      "allowedRoles": ["admin"]
-    },
-    {
-      "route": "/protected/*",
-      "allowedRoles": ["authenticated"]
-    }
-  ],
-  "responseOverrides": {
-    "401": {
-      "redirect": "/.auth/login/aad",
-      "statusCode": 302
-    },
-    "403": {
-      "rewrite": "/unauthorized.html"
-    }
-  }
-}
+import sqlite3
+import random
+import json
+import os
+from http.server import HTTPServer, SimpleHTTPRequestHandler
+from datetime import datetime
 
+DB_NAME = "dashboard.db"
 
+# 1. Initialize SQLite Database (Built-in)
+def init_db():
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS metrics (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            category TEXT NOT NULL,
+            value INTEGER NOT NULL,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    cursor.execute('SELECT COUNT(*) as count FROM metrics')
+    if cursor.fetchone()[0] == 0:
+        sample_data = [
+            ('Sales', 120),
+            ('Marketing', 85),
+            ('Engineering', 150),
+            ('Support', 65)
+        ]
+        cursor.executemany('INSERT INTO metrics (category, value) VALUES (?, ?)', sample_data)
+        conn.commit()
+        print("Sample database created successfully!")
+    conn.close()
 
-
-
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Entra ID Auth Test - Static Web App</title>
-    <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 40px; background: #f8f9fa; color: #333; }
-        .container { max-width: 650px; background: white; padding: 30px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
-        .btn { display: inline-block; padding: 10px 18px; margin: 8px 4px 8px 0; background: #0078d4; color: white; text-decoration: none; border-radius: 4px; font-weight: bold; }
-        .btn-danger { background: #d13438; }
-        .btn-secondary { background: #6c757d; }
-        pre { background: #1e1e1e; color: #d4d4d4; padding: 15px; border-radius: 6px; overflow-x: auto; font-size: 13px; }
-        .badge { display: inline-block; padding: 3px 8px; border-radius: 12px; background: #e1dfdd; font-size: 12px; font-weight: 600; margin-right: 4px; }
-    </style>
-</head>
-<body>
-
-    <div class="container">
-        <h2>Azure Static Web App Authentication</h2>
-        <div id="status-card">
-            <p><strong>Session Status:</strong> <span id="auth-status">Checking...</span></p>
-        </div>
-
-        <div id="action-buttons"></div>
-
-        <h3>Restricted Navigation Links:</h3>
-        <ul>
-            <li><a href="/protected/page.html">Go to Protected Route (`/protected/*`)</a></li>
-            <li><a href="/admin/dashboard.html">Go to Admin Route (`/admin/*`)</a></li>
-        </ul>
-
-        <h3>User Identity & Assigned Roles (`/.auth/me`):</h3>
-        <pre id="user-json">Loading user payload...</pre>
-    </div>
-
-    <script>
-        async function loadUserClaims() {
-            try {
-                // Fetch user data automatically provided by SWA runtime
-                const response = await fetch('/.auth/me');
-                const data = await response.json();
-                const user = data.clientPrincipal;
-
-                const statusEl = document.getElementById('auth-status');
-                const actionsEl = document.getElementById('action-buttons');
-                const jsonEl = document.getElementById('user-json');
-
-                if (user) {
-                    statusEl.innerHTML = `<span style="color: green; font-weight: bold;">Signed In</span> (${user.userDetails})`;
-                    actionsEl.innerHTML = `<a class="btn btn-danger" href="/.auth/logout">Sign Out</a>`;
-                    
-                    // Render claims JSON
-                    jsonEl.textContent = JSON.stringify(user, null, 2);
-                } else {
-                    statusEl.innerHTML = `<span style="color: #666;">Anonymous (Not Signed In)</span>`;
-                    actionsEl.innerHTML = `<a class="btn" href="/.auth/login/aad">Sign In with Microsoft Entra ID</a>`;
-                    jsonEl.textContent = "No active identity token found. Click 'Sign In' to authenticate.";
-                }
-            } catch (err) {
-                console.error("Failed to load user info:", err);
-                document.getElementById('user-json').textContent = "Error fetching /.auth/me endpoint.";
+# 2. Custom HTTP Handler using Python's built-in http.server
+class DashboardRequestHandler(SimpleHTTPRequestHandler):
+    
+    # Handle GET requests (Serving HTML & API endpoints)
+    def do_GET(self):
+        if self.path == '/api/metrics':
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            
+            conn = sqlite3.connect(DB_NAME)
+            cursor = conn.cursor()
+            cursor.execute('SELECT category, value, updated_at FROM metrics')
+            rows = cursor.fetchall()
+            conn.close()
+            
+            data = [{"category": row[0], "value": row[1], "updated_at": row[2]} for row in rows]
+            response = {
+                "timestamp": datetime.now().strftime("%I:%M:%S %p"),
+                "data": data
             }
-        }
+            self.wfile.write(json.dumps(response).encode('utf-8'))
+        else:
+            # Serve regular static HTML file
+            if self.path == '/':
+                self.path = '/index.html'
+            return super().do_GET()
 
-        loadUserClaims();
-    </script>
-</body>
-</html>
+    # Handle POST requests (Simulating database updates)
+    def do_POST(self):
+        if self.path == '/api/simulate-update':
+            conn = sqlite3.connect(DB_NAME)
+            cursor = conn.cursor()
+            cursor.execute('SELECT id, value FROM metrics')
+            rows = cursor.fetchall()
+            
+            for row in rows:
+                random_change = random.randint(-10, 20)
+                new_val = max(10, row[1] + random_change)
+                cursor.execute('UPDATE metrics SET value = ? WHERE id = ?', (new_val, row[0]))
+            
+            conn.commit()
+            conn.close()
+            
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({"status": "success"}).encode('utf-8'))
 
-
-
-
-
-
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <title>Admin Dashboard</title>
-    <style>
-        body { font-family: Arial, sans-serif; margin: 40px; }
-        .card { border: 2px solid #0078d4; padding: 20px; border-radius: 8px; }
-    </style>
-</head>
-<body>
-    <div class="card">
-        <h1 style="color: #0078d4;">Welcome to the Admin Portal!</h1>
-        <p>If you can read this page, your user account belongs to an Entra ID Security Group that was mapped to the <code>admin</code> role in the Azure Portal.</p>
-        <a href="/">← Back to Home</a>
-    </div>
-</body>
-</html>
-
-
-
-
-
-
+if __name__ == '__main__':
+    init_db()
+    server_address = ('', 8000)
+    httpd = HTTPServer(server_address, DashboardRequestHandler)
+    print("Server running at http://localhost:8000 (No Flask required!)")
+    httpd.serve_forever()
 
 
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <title>403 - Access Denied</title>
-    <style>
-        body { font-family: Arial, sans-serif; margin: 40px; text-align: center; }
-        .error-card { background: #fde8e8; border: 1px solid #f8b4b4; padding: 30px; border-radius: 8px; display: inline-block; }
-    </style>
-</head>
-<body>
-    <div class="error-card">
-        <h1 style="color: #9b1c1c;">403 - Access Denied</h1>
-        <p>You are logged in, but your Entra ID user account does not have the required <code>admin</code> role assigned to view this page.</p>
-        <a href="/">Return to Homepage</a>
-    </div>
-</body>
-</html>
+
+
+
+
+
+
+
+import sqlite3
+import random
+import json
+import os
+from http.server import HTTPServer, SimpleHTTPRequestHandler
+from datetime import datetime
+
+DB_NAME = "dashboard.db"
+
+# 1. Initialize SQLite Database (Built-in)
+def init_db():
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS metrics (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            category TEXT NOT NULL,
+            value INTEGER NOT NULL,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    cursor.execute('SELECT COUNT(*) as count FROM metrics')
+    if cursor.fetchone()[0] == 0:
+        sample_data = [
+            ('Sales', 120),
+            ('Marketing', 85),
+            ('Engineering', 150),
+            ('Support', 65)
+        ]
+        cursor.executemany('INSERT INTO metrics (category, value) VALUES (?, ?)', sample_data)
+        conn.commit()
+        print("Sample database created successfully!")
+    conn.close()
+
+# 2. Custom HTTP Handler using Python's built-in http.server
+class DashboardRequestHandler(SimpleHTTPRequestHandler):
+    
+    # Handle GET requests (Serving HTML & API endpoints)
+    def do_GET(self):
+        if self.path == '/api/metrics':
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            
+            conn = sqlite3.connect(DB_NAME)
+            cursor = conn.cursor()
+            cursor.execute('SELECT category, value, updated_at FROM metrics')
+            rows = cursor.fetchall()
+            conn.close()
+            
+            data = [{"category": row[0], "value": row[1], "updated_at": row[2]} for row in rows]
+            response = {
+                "timestamp": datetime.now().strftime("%I:%M:%S %p"),
+                "data": data
+            }
+            self.wfile.write(json.dumps(response).encode('utf-8'))
+        else:
+            # Serve regular static HTML file
+            if self.path == '/':
+                self.path = '/index.html'
+            return super().do_GET()
+
+    # Handle POST requests (Simulating database updates)
+    def do_POST(self):
+        if self.path == '/api/simulate-update':
+            conn = sqlite3.connect(DB_NAME)
+            cursor = conn.cursor()
+            cursor.execute('SELECT id, value FROM metrics')
+            rows = cursor.fetchall()
+            
+            for row in rows:
+                random_change = random.randint(-10, 20)
+                new_val = max(10, row[1] + random_change)
+                cursor.execute('UPDATE metrics SET value = ? WHERE id = ?', (new_val, row[0]))
+            
+            conn.commit()
+            conn.close()
+            
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({"status": "success"}).encode('utf-8'))
+
+if __name__ == '__main__':
+    init_db()
+    server_address = ('', 8000)
+    httpd = HTTPServer(server_address, DashboardRequestHandler)
+    print("Server running at http://localhost:8000 (No Flask required!)")
+    httpd.serve_forever()
+
+
+
+
+
+python app.py
