@@ -1,103 +1,118 @@
-def init_db():
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
+class AuthenticatedDashboardHandler(SimpleHTTPRequestHandler):
 
-    # 1. Existing metrics table
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS metrics (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            category TEXT NOT NULL,
-            value INTEGER NOT NULL,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    def authenticate(self):
+        auth_header = self.headers.get('Authorization')
+        if not auth_header:
+            return None
+
+        try:
+            auth_type, encoded = auth_header.split(' ', 1)
+            if auth_type.lower() != 'basic':
+                return None
+
+            decoded = base64.b64decode(encoded).decode('utf-8')
+            username, password = decoded.split(':', 1)
+
+            conn = sqlite3.connect(DB_NAME)
+            cursor = conn.cursor()
+            cursor.execute('SELECT password_hash FROM users WHERE username = ?', (username,))
+            row = cursor.fetchone()
+            conn.close()
+
+            if row and row[0] == hash_password(password):
+                return username  # Return username if authentication succeeds
+        except Exception:
+            return None
+
+        return None
+
+    def log_activity(self, username, action, endpoint):
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+
+        # 1. Log specific action in audit_logs
+        cursor.execute(
+            'INSERT INTO audit_logs (username, action, endpoint) VALUES (?, ?, ?)',
+            (username, action, endpoint)
         )
-    ''')
 
-    # 2. Existing users table
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL
-        )
-    ''')
+        # 2. Check if user has an open session record, or create a new one
+        cursor.execute('''
+            SELECT id FROM user_sessions 
+            WHERE username = ? AND logout_time IS NULL 
+            ORDER BY login_time DESC LIMIT 1
+        ''', (username,))
+        session = cursor.fetchone()
 
-    # 3. NEW: Active Sessions Table (Tracks logins, last active time, and logouts)
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS user_sessions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT NOT NULL,
-            login_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            last_activity TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            logout_time TIMESTAMP NULL
-        )
-    ''')
+        if session:
+            # Update last_activity timestamp to calculate duration later
+            cursor.execute('''
+                UPDATE user_sessions 
+                SET last_activity = CURRENT_TIMESTAMP 
+                WHERE id = ?
+            ''', (session[0],))
+        else:
+            # First time logging in during this session
+            cursor.execute(
+                'INSERT INTO user_sessions (username) VALUES (?)',
+                (username,)
+            )
 
-    # 4. NEW: Audit Logs Table (Tracks specific actions performed)
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS audit_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT NOT NULL,
-            action TEXT NOT NULL,
-            endpoint TEXT NOT NULL,
-            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
+        conn.commit()
+        conn.close()
 
-    # Seed default user if empty
-    cursor.execute('SELECT COUNT(*) FROM users')
-    if cursor.fetchone()[0] == 0:
-        cursor.execute('INSERT INTO users (username, password_hash) VALUES (?, ?)', 
-                       ('admin', hash_password('adminpassword')))
-        print("Created default user: admin / adminpassword", flush=True)
+    def do_GET(self):
+        username = self.authenticate()
+        if not username:
+            self.send_auth_prompt()
+            return
 
-    # Seed initial metrics if empty
-    cursor.execute('SELECT COUNT(*) FROM metrics')
-    if cursor.fetchone()[0] == 0:
-        sample_data = [('Sales', 120), ('Marketing', 85), ('Engineering', 150), ('Support', 65)]
-        cursor.executemany('INSERT INTO metrics (category, value) VALUES (?, ?)', sample_data)
+        # Track the action in audit_logs
+        if self.path == '/api/metrics':
+            self.log_activity(username, "FETCH_METRICS", self.path)
+            
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
 
-    conn.commit()
-    conn.close()
+            conn = sqlite3.connect(DB_NAME)
+            cursor = conn.cursor()
+            cursor.execute('SELECT category, value, updated_at FROM metrics')
+            rows = cursor.fetchall()
+            conn.close()
 
+            data = [{"category": row[0], "value": row[1], "updated_at": row[2]} for row in rows]
+            response = {"timestamp": datetime.now().strftime("%I:%M:%S %p"), "data": data}
+            self.wfile.write(json.dumps(response).encode('utf-8'))
+        else:
+            if self.path == '/' or self.path == '/index.html':
+                self.log_activity(username, "VIEW_DASHBOARD_PAGE", self.path)
+                self.path = '/index.html'
+            return super().do_GET()
 
+    def do_POST(self):
+        username = self.authenticate()
+        if not username:
+            self.send_auth_prompt()
+            return
 
+        if self.path == '/api/simulate-update':
+            self.log_activity(username, "SIMULATE_DB_UPDATE", self.path)
 
+            conn = sqlite3.connect(DB_NAME)
+            cursor = conn.cursor()
+            cursor.execute('SELECT id, value FROM metrics')
+            rows = cursor.fetchall()
 
-import sqlite3
+            for row in rows:
+                random_change = random.randint(-10, 20)
+                new_val = max(10, row[1] + random_change)
+                cursor.execute('UPDATE metrics SET value = ? WHERE id = ?', (new_val, row[0]))
 
-DB_NAME = "dashboard.db"
+            conn.commit()
+            conn.close()
 
-def show_audit_report():
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-
-    print("\n--- USER SESSIONS & DURATION ---")
-    cursor.execute('''
-        SELECT 
-            username,
-            login_time,
-            last_activity,
-            ROUND((JULIANDAY(last_activity) - JULIANDAY(login_time)) * 86400, 2) AS duration_seconds
-        FROM user_sessions
-        ORDER BY login_time DESC
-    ''')
-    sessions = cursor.fetchall()
-    
-    for row in sessions:
-        print(f"User: {row[0]} | Logged In: {row[1]} | Last Active: {row[2]} | Duration: {row[3]} seconds")
-
-    print("\n--- RECENT AUDIT LOGS ---")
-    cursor.execute('''
-        SELECT username, action, endpoint, timestamp 
-        FROM audit_logs 
-        ORDER BY timestamp DESC LIMIT 10
-    ''')
-    logs = cursor.fetchall()
-    
-    for log in logs:
-        print(f"[{log[3]}] User: {log[0]} | Action: {log[1]} ({log[2]})")
-
-    conn.close()
-
-if __name__ == '__main__':
-    show_audit_report()
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({"status": "success"}).encode('utf-8'))
