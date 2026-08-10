@@ -1,57 +1,60 @@
-import sqlite3
-import hashlib
-
-DB_NAME = "dashboard.db"
-
-def hash_password(password):
-    return hashlib.sha256(password.encode('utf-8')).hexdigest()
-
-def add_new_user(username, password):
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    
-    password_hash = hash_password(password)
-    
-    try:
-        cursor.execute('INSERT INTO users (username, password_hash) VALUES (?, ?)', (username, password_hash))
-        conn.commit()
-        print(f"Successfully added user: {username}")
-    except sqlite3.IntegrityError:
-        print(f"Error: User '{username}' already exists!")
-    finally:
-        conn.close()
-
-if __name__ == '__main__':
-    # Enter the new username and password you want to create
-    new_username = input("Enter new username: ")
-    new_password = input("Enter new password: ")
-    
-    add_new_user(new_username, new_password)
-
-
-
-
-
-
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    
-    # ... (table creation SQL) ...
 
-    # List of users to seed automatically
-    initial_users = [
-        ("admin", "adminpassword"),
-        ("john_doe", "password123"),
-        ("sarah_analytics", "securepass456")
-    ]
+    # 1. Existing metrics table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS metrics (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            category TEXT NOT NULL,
+            value INTEGER NOT NULL,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
 
-    for username, password in initial_users:
-        cursor.execute('SELECT COUNT(*) FROM users WHERE username = ?', (username,))
-        if cursor.fetchone()[0] == 0:
-            cursor.execute('INSERT INTO users (username, password_hash) VALUES (?, ?)', 
-                           (username, hash_password(password)))
-            print(f"Created user: {username}", flush=True)
+    # 2. Existing users table
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL
+        )
+    ''')
+
+    # 3. NEW: Active Sessions Table (Tracks logins, last active time, and logouts)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS user_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL,
+            login_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_activity TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            logout_time TIMESTAMP NULL
+        )
+    ''')
+
+    # 4. NEW: Audit Logs Table (Tracks specific actions performed)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS audit_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL,
+            action TEXT NOT NULL,
+            endpoint TEXT NOT NULL,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+    # Seed default user if empty
+    cursor.execute('SELECT COUNT(*) FROM users')
+    if cursor.fetchone()[0] == 0:
+        cursor.execute('INSERT INTO users (username, password_hash) VALUES (?, ?)', 
+                       ('admin', hash_password('adminpassword')))
+        print("Created default user: admin / adminpassword", flush=True)
+
+    # Seed initial metrics if empty
+    cursor.execute('SELECT COUNT(*) FROM metrics')
+    if cursor.fetchone()[0] == 0:
+        sample_data = [('Sales', 120), ('Marketing', 85), ('Engineering', 150), ('Support', 65)]
+        cursor.executemany('INSERT INTO metrics (category, value) VALUES (?, ?)', sample_data)
 
     conn.commit()
     conn.close()
