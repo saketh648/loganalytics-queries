@@ -1,4 +1,97 @@
-Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope Process
-.\venv\Scripts\activate
+import io
+import os
+import pandas as pd
+import streamlit as st
+from azure.identity import DefaultAzureCredential
+from azure.storage.filedatalake import DataLakeServiceClient
+
+st.set_page_config(
+    page_title="ADLS Gen2 Reader",
+    page_icon="📦",
+    layout="wide",
+)
+
+st.title("📦 ADLS Gen2 Reader")
+st.caption("Read files from ADLS Gen2 using Managed Identity")
 
 
+@st.cache_resource
+def get_client():
+    account_name = os.environ["ADLS_ACCOUNT_NAME"]
+    # DefaultAzureCredential automatically picks up Azure Workload Identity env variables
+    credential = DefaultAzureCredential()
+    account_url = f"https://{account_name}.dfs.core.windows.net"
+    return DataLakeServiceClient(account_url=account_url, credential=credential)
+
+
+service_client = get_client()
+
+container = st.text_input("Container", value="consumerspace")
+folder = st.text_input("Folder Path", value="")
+
+if st.button("List Files"):
+    try:
+        fs = service_client.get_file_system_client(container)
+        files = list(fs.get_paths(path=folder, recursive=False))
+        st.success(f"Found {len(files)} items")
+
+        for item in files:
+            if item.is_directory:
+                st.write(f"📁 {item.name}")
+            else:
+                st.write(f"📄 {item.name}")
+
+        # Store previewable file paths in session state
+        st.session_state["previewable_files"] = [
+            f.name
+            for f in files
+            if not f.is_directory
+            and (
+                f.name.endswith(".csv")
+                or f.name.endswith(".parquet")
+                or f.name.endswith(".json")
+            )
+        ]
+    except Exception as ex:
+        st.error(f"Error listing files: {str(ex)}")
+
+# Preview section
+if "previewable_files" in st.session_state and st.session_state["previewable_files"]:
+    selected = st.selectbox(
+        "Select a file to preview",
+        options=st.session_state["previewable_files"],
+    )
+
+    if st.button("Load Preview"):
+        try:
+            fs_client = service_client.get_file_system_client(file_system=container)
+            file_client = fs_client.get_file_client(selected)
+            content = file_client.download_file().readall()
+
+            df = None
+            if selected.endswith(".csv"):
+                df = pd.read_csv(io.BytesIO(content))
+            elif selected.endswith(".parquet"):
+                df = pd.read_parquet(io.BytesIO(content))
+            elif selected.endswith(".json"):
+                df = pd.read_json(io.BytesIO(content))
+            else:
+                st.error("Unsupported file type")
+                st.stop()
+
+            if df is not None:
+                st.dataframe(df, use_container_width=True)
+
+        except Exception as ex:
+            st.error(f"Error reading file preview: {str(ex)}")
+
+st.divider()
+
+# Test Managed Identity Token Acquisition
+if st.button("Test Managed Identity"):
+    try:
+        credential = DefaultAzureCredential()
+        credential.get_token("https://storage.azure.com/.default")
+        st.success("✅ Managed Identity Authentication Successful")
+    except Exception as ex:
+        st.error(f"❌ Managed Identity Authentication Failed: {str(ex)}")
