@@ -176,10 +176,10 @@ def show_error(ex, context):
 # Data access (cached so reruns don't re-hit storage)
 # ----------------------------------------------------------------------------
 @st.cache_data(ttl=30, show_spinner="Listing…")
-def list_dir(_client, account, container, path):
-    log.info("Listing %s/%s/%s", account, container, path)
+def list_dir(_client, account, container, path, recursive=False):
+    log.info("Listing %s/%s/%s (recursive=%s)", account, container, path, recursive)
     fs = _client.get_file_system_client(container)
-    paths = fs.get_paths(path=path or None, recursive=False)
+    paths = fs.get_paths(path=path or None, recursive=recursive)
     items = []
     for p in itertools.islice(paths, MAX_LIST_ITEMS):
         items.append(
@@ -310,7 +310,7 @@ with st.expander("⚙️ Connection", expanded=not configured):
         )
 
     c1, c2 = st.columns(2)
-    rows = c1.slider("Preview rows", 10, 1000, 100, step=10)
+    rows = c1.slider("Rows to load", 10, 5000, 200, step=10)
     max_mb = c2.slider("Max preview size (MB)", 1, 200, 25)
     st.button("♻️ Reset connection", on_click=reset_connection)
 
@@ -334,6 +334,21 @@ tab_browse, tab_diag, tab_logs = st.tabs(["📂 Browse", "🩺 Diagnostics", "�
 # ----------------------------------------------------------------------------
 # Browse
 # ----------------------------------------------------------------------------
+FILE_TYPES = ["parquet", "csv", "tsv", "json", "jsonl", "txt"]
+
+
+def ext_of(name):
+    return name.lower().rsplit(".", 1)[-1] if "." in name else ""
+
+
+def show_df(df):
+    try:
+        st.dataframe(df, use_container_width=True)
+    except Exception:
+        log.warning("Arrow rendering failed, falling back to string display")
+        st.dataframe(df.astype(str), use_container_width=True)
+
+
 with tab_browse:
     st.text_input(
         "Folder path",
@@ -346,79 +361,126 @@ with tab_browse:
     b2.button("⬆️ Up", on_click=go_up, disabled=not st.session_state.path, use_container_width=True)
     b3.button("🔄 Refresh", on_click=refresh, use_container_width=True)
 
+    recursive = st.toggle(
+        "Include subfolders",
+        value=False,
+        help="List every file under this folder. Useful for Spark/Databricks outputs "
+        "where data sits in part-*.parquet files inside folders.",
+    )
+    types = st.multiselect("File types", FILE_TYPES, default=["parquet", "csv"])
+
+    path = st.session_state.path
     items = None
     try:
-        items = list_dir(client, account, container, st.session_state.path)
+        items = list_dir(client, account, container, path, recursive)
     except Exception as ex:
-        show_error(ex, f"Could not list '{container}/{st.session_state.path}'")
+        show_error(ex, f"Could not list '{container}/{path}'")
 
     if items is not None:
         dirs = [i for i in items if i["is_directory"]]
-        files = [i for i in items if not i["is_directory"]]
-        msg = f"{len(dirs)} folders · {len(files)} files"
+        all_files = [i for i in items if not i["is_directory"]]
+        files = sorted(
+            (f for f in all_files if ext_of(f["name"]) in types),
+            key=lambda f: f["name"],
+        )
+
+        msg = f"{len(files)} matching files"
+        if not recursive:
+            msg = f"{len(dirs)} folders · " + msg
+        hidden = len(all_files) - len(files)
+        if hidden:
+            msg += f" · {hidden} hidden by type filter"
         if len(items) >= MAX_LIST_ITEMS:
-            msg += f" (showing first {MAX_LIST_ITEMS})"
+            msg += f" · listing capped at {MAX_LIST_ITEMS}"
         st.caption(msg)
 
-        if not items:
-            st.info("This folder is empty.")
+        if not recursive:
+            for d in dirs[:MAX_FOLDER_BUTTONS]:
+                st.button(
+                    f"📁 {basename(d['name'])}",
+                    key=f"dir:{d['name']}",
+                    on_click=go,
+                    args=(d["name"],),
+                    use_container_width=True,
+                )
+            if len(dirs) > MAX_FOLDER_BUTTONS:
+                st.caption(f"+{len(dirs) - MAX_FOLDER_BUTTONS} more folders. Type the path above to jump.")
 
-        for d in dirs[:MAX_FOLDER_BUTTONS]:
-            st.button(
-                f"📁 {basename(d['name'])}",
-                key=f"dir:{d['name']}",
-                on_click=go,
-                args=(d["name"],),
-                use_container_width=True,
-            )
-        if len(dirs) > MAX_FOLDER_BUTTONS:
-            st.caption(f"+{len(dirs) - MAX_FOLDER_BUTTONS} more folders. Type the path above to jump.")
+        if not files:
+            st.info("No matching files here. Try another folder, turn on subfolders, or add file types.")
+        else:
+            prefix = f"{path}/" if path else ""
+            sizes = {f["name"]: f["size"] for f in files}
+            names = list(sizes)
 
-        if files:
-            st.dataframe(
-                pd.DataFrame(
-                    {
-                        "File": [basename(f["name"]) for f in files],
-                        "Size": [human_size(f["size"]) for f in files],
-                        "Modified": [
-                            f["modified"].strftime("%Y-%m-%d %H:%M") if f["modified"] else ""
-                            for f in files
-                        ],
-                    }
-                ),
-                use_container_width=True,
-                hide_index=True,
-            )
-
-            names = [f["name"] for f in files]
             if st.session_state.get("selected_file") not in names:
                 st.session_state.selected_file = None
+
             selected = st.selectbox(
-                "Preview a file",
+                "📄 Select a file to view",
                 names,
                 index=None,
                 key="selected_file",
-                format_func=basename,
-                placeholder="Select a file",
+                format_func=lambda n: f"{n[len(prefix):] if n.startswith(prefix) else n}  ·  {human_size(sizes[n])}",
+                placeholder="Choose a file…",
             )
 
             if selected:
                 st.subheader(basename(selected))
                 try:
                     result = load_preview(client, account, container, selected, rows, max_mb)
-                    if result.get("note"):
-                        st.caption(result["note"])
                     kind = result["kind"]
+
                     if kind == "df":
-                        st.dataframe(result["df"], use_container_width=True)
+                        df = result["df"]
+                        st.caption(result.get("note", ""))
+
+                        cols = st.multiselect("Columns", list(df.columns), default=list(df.columns))
+                        q = st.text_input("Filter rows", placeholder="text to find in any column")
+
+                        view = df[cols] if cols else df
+                        if q:
+                            mask = (
+                                view.astype(str)
+                                .apply(lambda s: s.str.contains(q, case=False, na=False, regex=False))
+                                .any(axis=1)
+                            )
+                            view = view[mask]
+
+                        st.caption(
+                            f"Showing {len(view):,} of {len(df):,} loaded rows · {len(df.columns)} columns"
+                        )
+                        show_df(view)
+
+                        with st.expander("Schema"):
+                            st.dataframe(
+                                pd.DataFrame(
+                                    {
+                                        "Column": df.columns,
+                                        "Type": df.dtypes.astype(str).values,
+                                        "Nulls (loaded rows)": df.isna().sum().values,
+                                    }
+                                ),
+                                use_container_width=True,
+                                hide_index=True,
+                            )
+
+                        st.download_button(
+                            "⬇️ Download shown rows (CSV)",
+                            data=view.to_csv(index=False).encode("utf-8"),
+                            file_name=f"{basename(selected).rsplit('.', 1)[0]}_preview.csv",
+                            mime="text/csv",
+                        )
                     elif kind == "text":
+                        st.caption(result.get("note", ""))
                         st.code(result["text"], language="text")
                     elif kind == "too_large":
-                        st.warning("File too large to preview. Raise the limit in ⚙️ Connection.")
+                        st.warning(f"{result['note']}. Raise the limit in ⚙️ Connection.")
                     else:
-                        st.info("Preview isn't supported for this file type.")
+                        st.info(result.get("note", "Preview isn't supported for this file type."))
                 except Exception as ex:
-                    show_error(ex, f"Could not preview '{basename(selected)}'")
+                    show_error(ex, f"Could not load '{basename(selected)}'")
+
 
 # ----------------------------------------------------------------------------
 # Diagnostics
