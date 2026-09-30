@@ -41,7 +41,10 @@ st.markdown(
     """
 <style>
 #MainMenu, footer {visibility: hidden;}
-.block-container {padding-top: 1.5rem; padding-bottom: 2rem; max-width: 1400px;}
+.block-container {padding-top: 3.5rem; padding-bottom: 2rem; max-width: 1400px;}
+header[data-testid="stHeader"] {background: transparent !important; pointer-events: none;}
+header[data-testid="stHeader"] button, header[data-testid="stHeader"] a {pointer-events: auto;}
+.stAppDeployButton, [data-testid="stMainMenu"], [data-testid="stDecoration"] {display: none !important;}
 .app-header {display:flex; align-items:center; justify-content:space-between; gap:12px;
   padding:14px 18px; border:1px solid rgba(128,128,128,.25); border-radius:10px;
   background:rgba(128,128,128,.06); margin-bottom:1rem;}
@@ -53,12 +56,20 @@ st.markdown(
 .badge.err {background:rgba(220,53,69,.15); color:#d6293e; border:1px solid rgba(220,53,69,.45);}
 div[data-testid="stMetric"] {background:rgba(128,128,128,.06);
   border:1px solid rgba(128,128,128,.2); padding:10px 14px; border-radius:10px;}
-/* Explorer rows: look like a file list, not a wall of buttons */
-.st-key-explorer_list button {justify-content:flex-start !important; border-color:transparent !important;
-  background:transparent !important; padding-left:.5rem !important;}
-.st-key-explorer_list button:hover:not(:disabled) {background:rgba(128,128,128,.14) !important;}
+/* Azure-style list rows */
+.st-key-explorer_list button {justify-content:flex-start !important; border:none !important;
+  border-bottom:1px solid rgba(128,128,128,.15) !important; border-radius:0 !important;
+  background:transparent !important; padding:.55rem .5rem !important; min-height:0 !important;}
+.st-key-explorer_list button:hover:not(:disabled) {background:rgba(128,128,128,.12) !important;}
 .st-key-explorer_list button p {text-align:left; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
 .st-key-explorer_list button:disabled {opacity:.55;}
+/* Breadcrumb: link-style */
+.st-key-crumbbar button {border:none !important; background:transparent !important;
+  padding:.15rem .1rem !important; min-height:0 !important; color:#2f80ed !important;
+  justify-content:flex-start !important;}
+.st-key-crumbbar button:hover:not(:disabled) {text-decoration:underline; background:transparent !important;}
+.st-key-crumbbar button:disabled {opacity:1 !important; color:inherit !important; font-weight:600;}
+.st-key-crumbbar button p {white-space:nowrap;}
 </style>
 """,
     unsafe_allow_html=True,
@@ -370,16 +381,6 @@ def open_file(path):
     nav_set(st.session_state.nav_container, parent_of(path), path)
 
 
-def go_up():
-    s = st.session_state
-    if s.nav_file:
-        s.nav_file = None
-    elif s.nav_path:
-        s.nav_path = parent_of(s.nav_path)
-    else:
-        s.nav_container = ""
-
-
 def open_from_box():
     name = st.session_state.get("open_box", "").strip()
     if name:
@@ -480,48 +481,47 @@ def show_df(df):
         st.dataframe(df.astype(str), use_container_width=True)
 
 
-def render_toolbar(c, path, file):
-    crumbs = [{"label": "🏠 Home", "c": "", "p": "", "click": True}]
+def render_breadcrumb(c, path, file):
+    """Azure-storage-browser style path: Containers › container › folder › file."""
+    crumbs = [{"label": "Containers", "c": "", "p": ""}]
     if c:
-        crumbs.append({"label": c, "c": c, "p": "", "click": True})
+        crumbs.append({"label": c, "c": c, "p": ""})
         acc = ""
         for seg in [s for s in path.split("/") if s]:
             acc = f"{acc}/{seg}" if acc else seg
-            crumbs.append({"label": seg, "c": c, "p": acc, "click": True})
+            crumbs.append({"label": seg, "c": c, "p": acc})
         if file:
-            crumbs.append({"label": basename(file), "c": c, "p": path, "click": False})
-    if not file:
-        crumbs[-1]["click"] = False  # current location
+            crumbs.append({"label": basename(file), "c": c, "p": path})
     if len(crumbs) > 6:
-        crumbs = crumbs[:2] + [{"label": "…", "click": False}] + crumbs[-3:]
+        crumbs = crumbs[:2] + [{"label": "…", "skip": True}] + crumbs[-3:]
 
-    labels = [x["label"] if len(x["label"]) <= 24 else x["label"][:23] + "…" for x in crumbs]
-    weights = [max(len(lbl), 3) + 5 for lbl in labels]
-    cols = st.columns([4] + weights + [max(2, 60 - sum(weights))])
+    last = len(crumbs) - 1
+    labels = []
+    for i, x in enumerate(crumbs):
+        lbl = x["label"] if len(x["label"]) <= 28 else x["label"][:27] + "…"
+        labels.append(lbl if i == last else f"{lbl}  ›")
+    weights = [len(lbl) + 3 for lbl in labels]
 
-    cols[0].button("⬆ Up", key="nav_up", on_click=go_up, disabled=not c, use_container_width=True)
-    for i, (crumb, lbl) in enumerate(zip(crumbs, labels)):
-        cols[i + 1].button(
-            lbl,
-            key=f"crumb|{i}",
-            on_click=nav_set,
-            args=(crumb.get("c", ""), crumb.get("p", ""), None),
-            disabled=not crumb["click"],
-            use_container_width=True,
-        )
-
-    if c:
-        full = file or path
-        with st.expander("Copy path"):
-            st.code(f"abfss://{c}@{ACCOUNT}.dfs.core.windows.net/{full}", language="text")
+    with st.container(key="crumbbar"):
+        cols = st.columns(weights + [max(2, 70 - sum(weights))], gap="small")
+        for i, (x, lbl) in enumerate(zip(crumbs, labels)):
+            cols[i].button(
+                lbl,
+                key=f"crumb|{i}",
+                on_click=nav_set,
+                args=(x.get("c", ""), x.get("p", ""), None),
+                disabled=(i == last) or x.get("skip", False),
+                use_container_width=True,
+            )
 
 
 def render_entries(entries, key_prefix, empty_msg):
-    """Clickable list with name filter and pagination."""
+    """Clickable name list with filter and pagination."""
     q = st.text_input(
         "🔍 Filter by name",
         key=f"flt|{key_prefix}",
         placeholder="type to filter this list",
+        label_visibility="collapsed",
     )
     if q:
         entries = [e for e in entries if q.lower() in e["label"].lower()]
@@ -541,16 +541,10 @@ def render_entries(entries, key_prefix, empty_msg):
         st.caption(f"{total:,} items")
 
     start = (page - 1) * PAGE_SIZE
-    widths = [6, 1.5, 2]
-    h = st.columns(widths)
-    h[0].caption("Name")
-    h[1].caption("Size")
-    h[2].caption("Modified")
-
+    st.caption("Name")
     with st.container(key="explorer_list"):
         for e in entries[start : start + PAGE_SIZE]:
-            r = st.columns(widths, vertical_alignment="center")
-            r[0].button(
+            st.button(
                 f"{e['icon']}  {e['label']}",
                 key=f"{key_prefix}|{e['name']}",
                 on_click=e["cb"],
@@ -558,12 +552,9 @@ def render_entries(entries, key_prefix, empty_msg):
                 disabled=e.get("disabled", False),
                 use_container_width=True,
             )
-            r[1].caption(e.get("size", ""))
-            r[2].caption(e.get("modified", ""))
 
 
 def render_home():
-    st.subheader("Containers")
     if not containers:
         st.info(
             "This identity can't list containers (its role is likely scoped to a single container). "
@@ -571,10 +562,7 @@ def render_home():
         )
         st.text_input("Container name", key="open_box", on_change=open_from_box, placeholder="e.g. consumerspace")
         return
-    entries = [
-        {"icon": "🗄️", "label": n, "name": n, "cb": open_container, "size": "", "modified": ""}
-        for n in containers
-    ]
+    entries = [{"icon": "🗄️", "label": n, "name": n, "cb": open_container} for n in containers]
     render_entries(entries, "home", "No containers visible.")
 
 
@@ -591,21 +579,15 @@ def render_folder(c, path):
     files = [f for f in all_files if ext_of(f["name"]) in FILE_TYPES] if data_only else all_files
     hidden = len(all_files) - len(files)
 
-    entries = [
-        {"icon": "📁", "label": basename(d["name"]), "name": d["name"], "cb": open_dir, "size": "", "modified": fmt_dt(d["modified"])}
-        for d in dirs
-    ]
+    entries = [{"icon": "📁", "label": basename(d["name"]), "name": d["name"], "cb": open_dir} for d in dirs]
     for f in files:
-        previewable = ext_of(f["name"]) in FILE_TYPES
         entries.append(
             {
                 "icon": "📄",
                 "label": f["name"][len(prefix):] if flat and f["name"].startswith(prefix) else basename(f["name"]),
                 "name": f["name"],
                 "cb": open_file,
-                "size": human_size(f["size"]),
-                "modified": fmt_dt(f["modified"]),
-                "disabled": not previewable,
+                "disabled": ext_of(f["name"]) not in FILE_TYPES,
             }
         )
 
@@ -622,6 +604,7 @@ def render_folder(c, path):
 
 
 def render_file(c, path):
+    """Data-first view: just the table, with everything else tucked in one collapsed panel."""
     try:
         result = load_preview(client, ACCOUNT, c, path, rows, max_mb)
     except Exception as ex:
@@ -631,19 +614,14 @@ def render_file(c, path):
     kind = result["kind"]
     if kind == "df":
         df = result["df"]
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Size", human_size(result["size"]))
-        m2.metric("Modified", fmt_dt(result["modified"]) or "—")
-        m3.metric("Columns", f"{len(df.columns):,}")
-        if result["total_rows"] is not None:
-            m4.metric("Rows (total)", f"{result['total_rows']:,}")
-        else:
-            m4.metric("Rows (loaded)", f"{len(df):,}")
+        total = result["total_rows"]
+        summary = f"{total:,} rows · " if total is not None else ""
+        summary += f"{len(df.columns):,} columns · showing first {len(df):,} rows"
         if result.get("note"):
-            st.caption(result["note"])
+            summary += f" · {result['note']}"
+        st.caption(summary)
 
-        t_data, t_schema, t_stats = st.tabs(["Data", "Schema", "Statistics"])
-        with t_data:
+        with st.expander("Columns, filter & schema"):
             cols = st.multiselect("Columns", list(df.columns), default=list(df.columns))
             q = st.text_input("Filter rows", placeholder="text to find in any column", key=f"q|{path}")
             view = df[cols] if cols else df
@@ -654,33 +632,28 @@ def render_file(c, path):
                     .any(axis=1)
                 )
                 view = view[mask]
-            st.caption(f"Showing {len(view):,} of {len(df):,} loaded rows")
-            show_df(view)
+            st.dataframe(
+                pd.DataFrame(
+                    {
+                        "Column": df.columns,
+                        "Type": df.dtypes.astype(str).values,
+                        "Nulls": df.isna().sum().values,
+                    }
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
             st.download_button(
                 "⬇️ Download shown rows (CSV)",
                 data=view.to_csv(index=False).encode("utf-8"),
                 file_name=f"{basename(path).rsplit('.', 1)[0]}_preview.csv",
                 mime="text/csv",
             )
-        with t_schema:
-            st.dataframe(
-                pd.DataFrame(
-                    {
-                        "Column": df.columns,
-                        "Type": df.dtypes.astype(str).values,
-                        "Nulls (loaded rows)": df.isna().sum().values,
-                    }
-                ),
-                use_container_width=True,
-                hide_index=True,
-            )
-        with t_stats:
-            try:
-                show_df(df.describe(include="all").T)
-            except Exception as ex:
-                st.info(f"Statistics unavailable: {ex}")
+            st.caption("Path")
+            st.code(f"abfss://{c}@{ACCOUNT}.dfs.core.windows.net/{path}", language="text")
+
+        show_df(view)
     elif kind == "text":
-        st.caption(f"{human_size(result['size'])} {result.get('note', '')}")
         st.code(result["text"], language="text")
     elif kind == "too_large":
         st.warning(f"{result['note']}. Raise the limit under ⚙️ Options in the sidebar.")
@@ -701,12 +674,10 @@ with tab_x:
     if state == "failed":
         render_error(conn["error"], "Could not connect to storage")
     else:
-        render_toolbar(nav_c, nav_p, nav_f)
-        st.divider()
+        render_breadcrumb(nav_c, nav_p, nav_f)
         if not nav_c:
             render_home()
         elif nav_f:
-            st.subheader(f"📄 {basename(nav_f)}")
             render_file(nav_c, nav_f)
         else:
             render_folder(nav_c, nav_p)
