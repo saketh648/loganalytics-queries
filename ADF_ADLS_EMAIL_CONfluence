@@ -4,6 +4,7 @@ import io
 import itertools
 import json
 import logging
+import math
 import os
 import socket
 import sys
@@ -17,7 +18,7 @@ from azure.identity import DefaultAzureCredential
 from azure.storage.filedatalake import DataLakeServiceClient
 
 # ----------------------------------------------------------------------------
-# Static configuration (set via environment variables / Helm values)
+# Static configuration (environment variables / Helm values)
 # ----------------------------------------------------------------------------
 ACCOUNT = os.environ.get("ADLS_ACCOUNT_NAME", "").strip()
 DEFAULT_CONTAINER = os.environ.get("ADLS_CONTAINER", "").strip()
@@ -26,8 +27,8 @@ APP_TITLE = os.environ.get("APP_TITLE", "ADLS Data Explorer")
 
 SCOPE = "https://storage.azure.com/.default"
 FILE_TYPES = ["parquet", "csv", "tsv", "json", "jsonl", "txt"]
-MAX_LIST_ITEMS = 2000
-MAX_DEPTH = 12
+MAX_LIST_ITEMS = 5000
+PAGE_SIZE = 50
 
 st.set_page_config(
     page_title=APP_TITLE,
@@ -50,11 +51,14 @@ st.markdown(
 .badge.ok {background:rgba(34,160,90,.15); color:#1f9d55; border:1px solid rgba(34,160,90,.45);}
 .badge.warn {background:rgba(217,150,20,.15); color:#c98a00; border:1px solid rgba(217,150,20,.45);}
 .badge.err {background:rgba(220,53,69,.15); color:#d6293e; border:1px solid rgba(220,53,69,.45);}
-.crumb {font-family: ui-monospace, Menlo, Consolas, monospace; font-size:.85rem;
-  padding:8px 12px; border-radius:8px; background:rgba(128,128,128,.08);
-  border:1px solid rgba(128,128,128,.2); word-break:break-all; margin-bottom:.75rem;}
 div[data-testid="stMetric"] {background:rgba(128,128,128,.06);
   border:1px solid rgba(128,128,128,.2); padding:10px 14px; border-radius:10px;}
+/* Explorer rows: look like a file list, not a wall of buttons */
+.st-key-explorer_list button {justify-content:flex-start !important; border-color:transparent !important;
+  background:transparent !important; padding-left:.5rem !important;}
+.st-key-explorer_list button:hover:not(:disabled) {background:rgba(128,128,128,.14) !important;}
+.st-key-explorer_list button p {text-align:left; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.st-key-explorer_list button:disabled {opacity:.55;}
 </style>
 """,
     unsafe_allow_html=True,
@@ -163,14 +167,6 @@ def show_error(ex, context):
     render_error(err_info(ex), context)
 
 
-page_errors = []
-
-
-def note_error(ex, context):
-    log.error("%s", context, exc_info=ex)
-    page_errors.append((err_info(ex), context))
-
-
 # ----------------------------------------------------------------------------
 # Azure clients + connection check
 # ----------------------------------------------------------------------------
@@ -244,6 +240,10 @@ def ext_of(name):
     return name.lower().rsplit(".", 1)[-1] if "." in name else ""
 
 
+def fmt_dt(dt):
+    return dt.strftime("%Y-%m-%d %H:%M") if dt else ""
+
+
 def decode_jwt(token):
     payload = token.split(".")[1]
     payload += "=" * (-len(payload) % 4)
@@ -298,11 +298,6 @@ def list_dir(_client, account, container, path, recursive=False):
     return items
 
 
-def subfolders(client, container, path):
-    items = list_dir(client, ACCOUNT, container, path, False)
-    return sorted(i["name"] for i in items if i["is_directory"])
-
-
 @st.cache_data(ttl=300, show_spinner="Loading data…")
 def load_preview(_client, account, container, path, rows, max_mb):
     log.info("Preview %s/%s/%s", account, container, path)
@@ -349,6 +344,69 @@ def load_preview(_client, account, container, path, rows, max_mb):
 
 
 # ----------------------------------------------------------------------------
+# Navigation state + callbacks (all navigation goes through these)
+# ----------------------------------------------------------------------------
+st.session_state.setdefault("nav_container", DEFAULT_CONTAINER)
+st.session_state.setdefault("nav_path", "")
+st.session_state.setdefault("nav_file", None)
+st.session_state.setdefault("known_containers", [])
+
+
+def nav_set(container="", path="", file=None):
+    st.session_state.nav_container = container
+    st.session_state.nav_path = path
+    st.session_state.nav_file = file
+
+
+def open_container(name):
+    nav_set(name)
+
+
+def open_dir(path):
+    nav_set(st.session_state.nav_container, path)
+
+
+def open_file(path):
+    nav_set(st.session_state.nav_container, parent_of(path), path)
+
+
+def go_up():
+    s = st.session_state
+    if s.nav_file:
+        s.nav_file = None
+    elif s.nav_path:
+        s.nav_path = parent_of(s.nav_path)
+    else:
+        s.nav_container = ""
+
+
+def open_from_box():
+    name = st.session_state.get("open_box", "").strip()
+    if name:
+        nav_set(name)
+
+
+def jump_to_path():
+    st.session_state.jump_error = None
+    raw = st.session_state.get("jump_box", "").strip()
+    if not raw:
+        return
+    try:
+        acct, cont, p = parse_path(raw, st.session_state.known_containers)
+        if acct and acct.lower() != ACCOUNT.lower():
+            raise ValueError(f"This app is locked to '{ACCOUNT}', but the path points to '{acct}'.")
+        if not cont:
+            raise ValueError("Could not find a container in that path.")
+        if ext_of(p) in FILE_TYPES:
+            nav_set(cont, parent_of(p), p)
+        else:
+            nav_set(cont, p, None)
+        log.info("Jumped to %s/%s", cont, p)
+    except ValueError as ex:
+        st.session_state.jump_error = str(ex)
+
+
+# ----------------------------------------------------------------------------
 # Startup: config + connection
 # ----------------------------------------------------------------------------
 if not ACCOUNT:
@@ -364,6 +422,7 @@ except Exception as ex:
 conn = check_connection(client, ACCOUNT)
 state = conn["state"]
 containers = ALLOWED_CONTAINERS or conn["containers"]
+st.session_state.known_containers = containers
 
 badge_cls, badge_txt = {
     "connected": ("ok", "● Connected"),
@@ -379,137 +438,39 @@ st.markdown(
 )
 
 # ----------------------------------------------------------------------------
-# Sidebar: navigation
+# Sidebar: jump-to-path + options only (navigation lives in the center)
 # ----------------------------------------------------------------------------
-target = {"container": None, "folder": "", "file": None}
-
 with st.sidebar:
     st.markdown("### 🗂️ Explorer")
     st.caption(f"Account · `{ACCOUNT}`")
-    mode = st.radio("Open by", ["Browse", "Paste path"], horizontal=True, label_visibility="collapsed")
-    nav_box = st.container()
-    opts_box = st.expander("⚙️ Options")
+    st.text_input(
+        "Jump to path",
+        key="jump_box",
+        on_change=jump_to_path,
+        placeholder="abfss://… or container/dir/file.parquet",
+        help="Paste an abfss:// or https:// URL, or container/path. Press Enter. "
+        "A file path opens the file, a folder path opens the folder.",
+    )
+    if st.session_state.get("jump_error"):
+        st.error(st.session_state.jump_error)
+
+    with st.expander("⚙️ Options"):
+        data_only = st.toggle("Show only data files", value=True, help="Hides _SUCCESS, .crc and other non-data files.")
+        flat = st.toggle(
+            "Flat view (include subfolders)",
+            value=False,
+            help="Lists every file below the current folder in one list. Handy for Spark part-*.parquet output.",
+        )
+        rows = st.slider("Rows to load", 10, 5000, 200, step=10)
+        max_mb = st.slider("Max size for parquet/json (MB)", 1, 200, 25)
+
     s1, s2 = st.columns(2)
     s1.button("🔄 Refresh", on_click=refresh, use_container_width=True)
     s2.button("♻️ Reconnect", on_click=reconnect, use_container_width=True)
 
-with opts_box:
-    types = st.multiselect("File types", FILE_TYPES, default=["parquet", "csv"])
-    rows = st.slider("Rows to load", 10, 5000, 200, step=10)
-    max_mb = st.slider("Max size for parquet/json (MB)", 1, 200, 25)
-    recursive = st.toggle(
-        "Include subfolders in file list",
-        value=False,
-        help="Lists every file below the chosen folder. Handy for Spark outputs with part-*.parquet files.",
-    )
-
-with nav_box:
-    if state == "failed":
-        st.error("Not connected. See the Diagnostics tab.")
-    elif mode == "Browse":
-        if containers:
-            idx = containers.index(DEFAULT_CONTAINER) if DEFAULT_CONTAINER in containers else None
-            container = st.selectbox(
-                "Container", containers, index=idx, placeholder="Select a container", key="container_sel"
-            )
-        else:
-            container = st.text_input("Container", value=DEFAULT_CONTAINER, key="container_txt").strip()
-            if state == "limited":
-                st.caption("Container listing isn't permitted for this identity, so type the container name.")
-
-        if container:
-            target["container"] = container
-            current = ""
-            try:
-                for depth in range(MAX_DEPTH):
-                    subs = subfolders(client, container, current)
-                    if not subs:
-                        break
-                    choice = st.selectbox(
-                        "📁 Folder" if depth == 0 else f"📁 Subfolder {depth}",
-                        [""] + subs,
-                        key=f"lvl|{container}|{current}",
-                        format_func=lambda p, d=depth: (
-                            ("(container root)" if d == 0 else "(this folder)") if p == "" else basename(p)
-                        ),
-                    )
-                    if not choice:
-                        break
-                    current = choice
-            except Exception as ex:
-                note_error(ex, f"Could not list folders in '{container}/{current}'")
-            target["folder"] = current
-
-            try:
-                file_items = list_dir(client, ACCOUNT, container, current, recursive)
-                files = sorted(
-                    (f for f in file_items if not f["is_directory"] and ext_of(f["name"]) in types),
-                    key=lambda f: f["name"],
-                )
-                sizes = {f["name"]: f["size"] for f in files}
-                prefix = f"{current}/" if current else ""
-                if sizes:
-                    picked = st.selectbox(
-                        "📄 File",
-                        list(sizes),
-                        index=None,
-                        placeholder="Select a file",
-                        key=f"file|{container}|{current}|{int(recursive)}|{'-'.join(sorted(types))}",
-                        format_func=lambda n: f"{n[len(prefix):] if n.startswith(prefix) else n}  ·  {human_size(sizes[n])}",
-                    )
-                    target["file"] = picked
-                else:
-                    st.caption("No matching files in this folder.")
-            except Exception as ex:
-                note_error(ex, f"Could not list files in '{container}/{current}'")
-    else:
-        raw = st.text_input(
-            "Path to file or folder",
-            key="paste_path",
-            placeholder="abfss://container@account.dfs.core.windows.net/dir/file.parquet",
-            help="Accepts abfss:// or https:// URLs, or container/path/file.parquet. "
-            "A folder path lists the matching files beneath it.",
-        )
-        if raw.strip():
-            try:
-                acct, cont, p = parse_path(raw, containers)
-                if acct and acct.lower() != ACCOUNT.lower():
-                    raise ValueError(f"This app is locked to '{ACCOUNT}', but the path points to '{acct}'.")
-                if not cont:
-                    raise ValueError("Could not find a container in that path.")
-                target["container"] = cont
-                if ext_of(p) in FILE_TYPES:
-                    target["file"] = p
-                    target["folder"] = parent_of(p)
-                else:
-                    target["folder"] = p
-                    try:
-                        found = list_dir(client, ACCOUNT, cont, p, True)
-                        files = sorted(
-                            (f for f in found if not f["is_directory"] and ext_of(f["name"]) in types),
-                            key=lambda f: f["name"],
-                        )
-                        sizes = {f["name"]: f["size"] for f in files}
-                        prefix = f"{p}/" if p else ""
-                        if sizes:
-                            target["file"] = st.selectbox(
-                                "📄 File in folder",
-                                list(sizes),
-                                index=None,
-                                placeholder="Select a file",
-                                key=f"pfile|{cont}|{p}|{'-'.join(sorted(types))}",
-                                format_func=lambda n: f"{n[len(prefix):] if n.startswith(prefix) else n}  ·  {human_size(sizes[n])}",
-                            )
-                        else:
-                            st.caption("No matching files under that folder.")
-                    except Exception as ex:
-                        note_error(ex, f"Could not list '{cont}/{p}'")
-            except ValueError as ex:
-                st.error(str(ex))
-
 
 # ----------------------------------------------------------------------------
-# Main content
+# Rendering helpers
 # ----------------------------------------------------------------------------
 def show_df(df):
     try:
@@ -519,9 +480,150 @@ def show_df(df):
         st.dataframe(df.astype(str), use_container_width=True)
 
 
-def render_file(container, path):
+def render_toolbar(c, path, file):
+    crumbs = [{"label": "🏠 Home", "c": "", "p": "", "click": True}]
+    if c:
+        crumbs.append({"label": c, "c": c, "p": "", "click": True})
+        acc = ""
+        for seg in [s for s in path.split("/") if s]:
+            acc = f"{acc}/{seg}" if acc else seg
+            crumbs.append({"label": seg, "c": c, "p": acc, "click": True})
+        if file:
+            crumbs.append({"label": basename(file), "c": c, "p": path, "click": False})
+    if not file:
+        crumbs[-1]["click"] = False  # current location
+    if len(crumbs) > 6:
+        crumbs = crumbs[:2] + [{"label": "…", "click": False}] + crumbs[-3:]
+
+    labels = [x["label"] if len(x["label"]) <= 24 else x["label"][:23] + "…" for x in crumbs]
+    weights = [max(len(lbl), 3) + 5 for lbl in labels]
+    cols = st.columns([4] + weights + [max(2, 60 - sum(weights))])
+
+    cols[0].button("⬆ Up", key="nav_up", on_click=go_up, disabled=not c, use_container_width=True)
+    for i, (crumb, lbl) in enumerate(zip(crumbs, labels)):
+        cols[i + 1].button(
+            lbl,
+            key=f"crumb|{i}",
+            on_click=nav_set,
+            args=(crumb.get("c", ""), crumb.get("p", ""), None),
+            disabled=not crumb["click"],
+            use_container_width=True,
+        )
+
+    if c:
+        full = file or path
+        with st.expander("Copy path"):
+            st.code(f"abfss://{c}@{ACCOUNT}.dfs.core.windows.net/{full}", language="text")
+
+
+def render_entries(entries, key_prefix, empty_msg):
+    """Clickable list with name filter and pagination."""
+    q = st.text_input(
+        "🔍 Filter by name",
+        key=f"flt|{key_prefix}",
+        placeholder="type to filter this list",
+    )
+    if q:
+        entries = [e for e in entries if q.lower() in e["label"].lower()]
+
+    total = len(entries)
+    if total == 0:
+        st.info(empty_msg if not q else "Nothing matches that filter.")
+        return
+
+    pages = max(1, math.ceil(total / PAGE_SIZE))
+    page = 1
+    if pages > 1:
+        p1, p2 = st.columns([1, 4])
+        page = p1.number_input("Page", 1, pages, 1, key=f"pg|{key_prefix}|{q}")
+        p2.caption(f"{total:,} items · page {page} of {pages}")
+    else:
+        st.caption(f"{total:,} items")
+
+    start = (page - 1) * PAGE_SIZE
+    widths = [6, 1.5, 2]
+    h = st.columns(widths)
+    h[0].caption("Name")
+    h[1].caption("Size")
+    h[2].caption("Modified")
+
+    with st.container(key="explorer_list"):
+        for e in entries[start : start + PAGE_SIZE]:
+            r = st.columns(widths, vertical_alignment="center")
+            r[0].button(
+                f"{e['icon']}  {e['label']}",
+                key=f"{key_prefix}|{e['name']}",
+                on_click=e["cb"],
+                args=(e["name"],),
+                disabled=e.get("disabled", False),
+                use_container_width=True,
+            )
+            r[1].caption(e.get("size", ""))
+            r[2].caption(e.get("modified", ""))
+
+
+def render_home():
+    st.subheader("Containers")
+    if not containers:
+        st.info(
+            "This identity can't list containers (its role is likely scoped to a single container). "
+            "Enter the container name to open it."
+        )
+        st.text_input("Container name", key="open_box", on_change=open_from_box, placeholder="e.g. consumerspace")
+        return
+    entries = [
+        {"icon": "🗄️", "label": n, "name": n, "cb": open_container, "size": "", "modified": ""}
+        for n in containers
+    ]
+    render_entries(entries, "home", "No containers visible.")
+
+
+def render_folder(c, path):
     try:
-        result = load_preview(client, ACCOUNT, container, path, rows, max_mb)
+        items = list_dir(client, ACCOUNT, c, path, flat)
+    except Exception as ex:
+        show_error(ex, f"Could not list '{c}/{path}'")
+        return
+
+    prefix = f"{path}/" if path else ""
+    dirs = [] if flat else sorted((i for i in items if i["is_directory"]), key=lambda i: i["name"])
+    all_files = sorted((i for i in items if not i["is_directory"]), key=lambda i: i["name"])
+    files = [f for f in all_files if ext_of(f["name"]) in FILE_TYPES] if data_only else all_files
+    hidden = len(all_files) - len(files)
+
+    entries = [
+        {"icon": "📁", "label": basename(d["name"]), "name": d["name"], "cb": open_dir, "size": "", "modified": fmt_dt(d["modified"])}
+        for d in dirs
+    ]
+    for f in files:
+        previewable = ext_of(f["name"]) in FILE_TYPES
+        entries.append(
+            {
+                "icon": "📄",
+                "label": f["name"][len(prefix):] if flat and f["name"].startswith(prefix) else basename(f["name"]),
+                "name": f["name"],
+                "cb": open_file,
+                "size": human_size(f["size"]),
+                "modified": fmt_dt(f["modified"]),
+                "disabled": not previewable,
+            }
+        )
+
+    if len(items) >= MAX_LIST_ITEMS:
+        st.warning(f"Listing capped at {MAX_LIST_ITEMS:,} items. Use the filter or open a deeper folder.")
+    if hidden:
+        st.caption(f"{hidden} non-data files hidden (change under ⚙️ Options).")
+
+    render_entries(
+        entries,
+        f"{c}|{path}|{int(flat)}|{int(data_only)}",
+        "This folder has no folders or data files.",
+    )
+
+
+def render_file(c, path):
+    try:
+        result = load_preview(client, ACCOUNT, c, path, rows, max_mb)
     except Exception as ex:
         show_error(ex, f"Could not load '{basename(path)}'")
         return
@@ -531,7 +633,7 @@ def render_file(container, path):
         df = result["df"]
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Size", human_size(result["size"]))
-        m2.metric("Modified", result["modified"].strftime("%Y-%m-%d %H:%M") if result["modified"] else "—")
+        m2.metric("Modified", fmt_dt(result["modified"]) or "—")
         m3.metric("Columns", f"{len(df.columns):,}")
         if result["total_rows"] is not None:
             m4.metric("Rows (total)", f"{result['total_rows']:,}")
@@ -586,57 +688,28 @@ def render_file(container, path):
         st.info(result.get("note", "Preview isn't supported for this file type."))
 
 
-def render_folder(container, folder):
-    try:
-        items = list_dir(client, ACCOUNT, container, folder, False)
-    except Exception as ex:
-        show_error(ex, f"Could not list '{container}/{folder}'")
-        return
-    dirs = sorted((i for i in items if i["is_directory"]), key=lambda i: i["name"])
-    files = sorted((i for i in items if not i["is_directory"]), key=lambda i: i["name"])
-    st.caption(f"{len(dirs)} folders · {len(files)} files. Pick a file in the sidebar to view its data.")
-    if not items:
-        st.info("This folder is empty.")
-        return
-    rows_out = [{"": "📁", "Name": basename(d["name"]), "Size": "", "Modified": ""} for d in dirs]
-    rows_out += [
-        {
-            "": "📄",
-            "Name": basename(f["name"]),
-            "Size": human_size(f["size"]),
-            "Modified": f["modified"].strftime("%Y-%m-%d %H:%M") if f["modified"] else "",
-        }
-        for f in files
-    ]
-    st.dataframe(pd.DataFrame(rows_out), use_container_width=True, hide_index=True)
-
-
+# ----------------------------------------------------------------------------
+# Main content
+# ----------------------------------------------------------------------------
 tab_x, tab_d, tab_l = st.tabs(["📊 Explorer", "🩺 Diagnostics", "📜 Logs"])
 
-with tab_x:
-    for info, ctx in page_errors:
-        render_error(info, ctx)
+nav_c = st.session_state.nav_container
+nav_p = st.session_state.nav_path
+nav_f = st.session_state.nav_file
 
+with tab_x:
     if state == "failed":
         render_error(conn["error"], "Could not connect to storage")
-    elif not target["container"]:
-        st.info("Choose a container in the sidebar, or switch to **Paste path** to open a file directly.")
     else:
-        c, folder, file = target["container"], target["folder"], target["file"]
-        parts = [c] + ([p for p in folder.split("/") if p] if folder else [])
-        if file and basename(file) not in parts:
-            parts.append(basename(file))
-        crumb = " › ".join(html.escape(p) for p in parts)
-        st.markdown(f'<div class="crumb">{crumb}</div>', unsafe_allow_html=True)
-
-        full = file or folder
-        with st.expander("Copy path"):
-            st.code(f"abfss://{c}@{ACCOUNT}.dfs.core.windows.net/{full}", language="text")
-
-        if file:
-            render_file(c, file)
+        render_toolbar(nav_c, nav_p, nav_f)
+        st.divider()
+        if not nav_c:
+            render_home()
+        elif nav_f:
+            st.subheader(f"📄 {basename(nav_f)}")
+            render_file(nav_c, nav_f)
         else:
-            render_folder(c, folder)
+            render_folder(nav_c, nav_p)
 
 with tab_d:
     st.subheader("Workload identity environment")
@@ -652,7 +725,7 @@ with tab_d:
     if conn.get("error"):
         render_error(conn["error"], "Connection check reported a problem")
 
-    diag_container = target["container"] or DEFAULT_CONTAINER
+    diag_container = nav_c or DEFAULT_CONTAINER
     if st.button("▶️ Run full connectivity test", type="primary"):
         results = []
 
@@ -701,7 +774,7 @@ with tab_d:
                 if step(f"4. Read container '{diag_container}'", props):
                     step("5. List container root", listing)
             else:
-                results.append(("ℹ️", "4. Container checks", "Select a container in the sidebar to test it."))
+                results.append(("ℹ️", "4. Container checks", "Open a container in the Explorer first to test it."))
 
         for icon, name, detail in results:
             st.markdown(f"{icon} **{name}**")
