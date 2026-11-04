@@ -1,7 +1,7 @@
 {
   "name": "sync-hcv-to-akv",
   "properties": {
-    "description": "Daily sync of HashiCorp Vault KV v2 secrets into Azure Key Vault. Compares Vault current_version with the vault_version tag on the AKV secret. Creates a new AKV version when new or rotated and sends one digest email via Logic App.",
+    "description": "Daily sync of HashiCorp Vault KV v2 secrets into Azure Key Vault. AKV secret name comes from display_name inside the secret data (falls back to the Vault object id path). Creates a new AKV version when a secret is new or its Vault version is higher than the vault_version tag. Sends one digest email via Logic App.",
     "parameters": {
       "vault_url": { "type": "string", "defaultValue": "https://hcvault.yourcompany.com:8200" },
       "vault_namespace": { "type": "string", "defaultValue": "your/namespace" },
@@ -10,15 +10,17 @@
       "role_id": { "type": "string", "defaultValue": "<approle-role-id>" },
       "approle_secret_id_name": { "type": "string", "defaultValue": "hcv-approle-secret-id" },
       "akv_url": { "type": "string", "defaultValue": "https://kv-cus-synpeacx-prod-01.vault.azure.net" },
-      "logic_app_url": { "type": "string", "defaultValue": "<logic-app-http-post-url>" }
+      "logic_app_url": { "type": "string", "defaultValue": "<logic-app-http-post-url>" },
+      "send_email": { "type": "bool", "defaultValue": true }
     },
     "variables": {
-      "changes": { "type": "Array" }
+      "changes": { "type": "Array" },
+      "akv_name": { "type": "String" }
     },
     "activities": [
       {
         "name": "get_approle_secret_id",
-        "description": "Read the AppRole secret_id from AKV so it is never stored in the pipeline.",
+        "description": "AppRole secret_id used to log in to Vault. Read from AKV so it is never stored in the pipeline.",
         "type": "WebActivity",
         "dependsOn": [],
         "policy": { "timeout": "0.00:05:00", "retry": 1, "retryIntervalInSeconds": 30, "secureOutput": true, "secureInput": true },
@@ -79,16 +81,16 @@
       },
       {
         "name": "for_each_vault_secret",
+        "description": "Sequential on purpose: Set variable (akv_name) is not safe in parallel.",
         "type": "ForEach",
         "dependsOn": [ { "activity": "filter_keys", "dependencyConditions": [ "Succeeded" ] } ],
         "typeProperties": {
           "items": { "value": "@activity('filter_keys').output.Value", "type": "Expression" },
-          "isSequential": false,
-          "batchCount": 4,
+          "isSequential": true,
           "activities": [
             {
               "name": "get_vault_metadata",
-              "description": "Metadata only: current_version and updated_time. No secret value.",
+              "description": "Metadata only: current_version and updated_time.",
               "type": "WebActivity",
               "dependsOn": [],
               "policy": { "timeout": "0.00:05:00", "retry": 2, "retryIntervalInSeconds": 30, "secureOutput": false, "secureInput": true },
@@ -105,14 +107,45 @@
               }
             },
             {
+              "name": "get_vault_data",
+              "description": "Needed on every run because display_name lives inside the secret data. Secure input/output keeps values out of run history.",
+              "type": "WebActivity",
+              "dependsOn": [ { "activity": "get_vault_metadata", "dependencyConditions": [ "Succeeded" ] } ],
+              "policy": { "timeout": "0.00:05:00", "retry": 2, "retryIntervalInSeconds": 30, "secureOutput": true, "secureInput": true },
+              "typeProperties": {
+                "url": {
+                  "value": "@{pipeline().parameters.vault_url}/v1/@{pipeline().parameters.vault_mount}/data/@{pipeline().parameters.vault_list_path}@{item()}",
+                  "type": "Expression"
+                },
+                "method": "GET",
+                "headers": {
+                  "X-Vault-Token": { "value": "@activity('hashVaultLogin').output.auth.client_token", "type": "Expression" },
+                  "X-Vault-Namespace": { "value": "@pipeline().parameters.vault_namespace", "type": "Expression" }
+                }
+              }
+            },
+            {
+              "name": "set_akv_name",
+              "description": "display_name from the secret data, else the object id. Replaces characters AKV does not allow (only letters, digits and - are valid).",
+              "type": "SetVariable",
+              "dependsOn": [ { "activity": "get_vault_data", "dependencyConditions": [ "Succeeded" ] } ],
+              "typeProperties": {
+                "variableName": "akv_name",
+                "value": {
+                  "value": "@replace(replace(replace(replace(replace(replace(replace(coalesce(activity('get_vault_data').output.data.data?.display_name, item()),' ','-'),'_','-'),'.','-'),'/','-'),':','-'),'@','-'),'+','-')",
+                  "type": "Expression"
+                }
+              }
+            },
+            {
               "name": "get_akv_secret",
               "description": "404 means the secret does not exist yet. Failure is handled by the next activity.",
               "type": "WebActivity",
-              "dependsOn": [ { "activity": "get_vault_metadata", "dependencyConditions": [ "Succeeded" ] } ],
+              "dependsOn": [ { "activity": "set_akv_name", "dependencyConditions": [ "Succeeded" ] } ],
               "policy": { "timeout": "0.00:05:00", "retry": 0, "secureOutput": true, "secureInput": false },
               "typeProperties": {
                 "url": {
-                  "value": "@{pipeline().parameters.akv_url}/secrets/@{replace(replace(item(),'/','-'),'_','-')}?api-version=7.4",
+                  "value": "@{pipeline().parameters.akv_url}/secrets/@{variables('akv_name')}?api-version=7.4",
                   "type": "Expression"
                 },
                 "method": "GET",
@@ -130,31 +163,14 @@
                 },
                 "ifTrueActivities": [
                   {
-                    "name": "get_vault_data",
+                    "name": "put_akv_secret",
+                    "description": "Each PUT creates a new AKV secret version. Stores the whole Vault key/value map as a JSON string.",
                     "type": "WebActivity",
                     "dependsOn": [],
                     "policy": { "timeout": "0.00:05:00", "retry": 2, "retryIntervalInSeconds": 30, "secureOutput": true, "secureInput": true },
                     "typeProperties": {
                       "url": {
-                        "value": "@{pipeline().parameters.vault_url}/v1/@{pipeline().parameters.vault_mount}/data/@{pipeline().parameters.vault_list_path}@{item()}",
-                        "type": "Expression"
-                      },
-                      "method": "GET",
-                      "headers": {
-                        "X-Vault-Token": { "value": "@activity('hashVaultLogin').output.auth.client_token", "type": "Expression" },
-                        "X-Vault-Namespace": { "value": "@pipeline().parameters.vault_namespace", "type": "Expression" }
-                      }
-                    }
-                  },
-                  {
-                    "name": "put_akv_secret",
-                    "description": "Each PUT creates a new AKV secret version. Stores the whole Vault key/value map as a JSON string.",
-                    "type": "WebActivity",
-                    "dependsOn": [ { "activity": "get_vault_data", "dependencyConditions": [ "Succeeded" ] } ],
-                    "policy": { "timeout": "0.00:05:00", "retry": 2, "retryIntervalInSeconds": 30, "secureOutput": true, "secureInput": true },
-                    "typeProperties": {
-                      "url": {
-                        "value": "@{pipeline().parameters.akv_url}/secrets/@{replace(replace(item(),'/','-'),'_','-')}?api-version=7.4",
+                        "value": "@{pipeline().parameters.akv_url}/secrets/@{variables('akv_name')}?api-version=7.4",
                         "type": "Expression"
                       },
                       "method": "PUT",
@@ -165,7 +181,7 @@
                         "tags": {
                           "vault_version": "@{string(activity('get_vault_metadata').output.data.current_version)}",
                           "vault_updated": "@{activity('get_vault_metadata').output.data.updated_time}",
-                          "vault_path": "@{item()}",
+                          "vault_path": "@{pipeline().parameters.vault_list_path}@{item()}",
                           "synced_by": "adf-sync-hcv-to-akv"
                         }
                       },
@@ -174,13 +190,13 @@
                   },
                   {
                     "name": "append_change",
-                    "description": "Names and versions only, never values",
+                    "description": "Names, paths and versions only, never values",
                     "type": "AppendVariable",
                     "dependsOn": [ { "activity": "put_akv_secret", "dependencyConditions": [ "Succeeded" ] } ],
                     "typeProperties": {
                       "variableName": "changes",
                       "value": {
-                        "value": "@json(concat('{\"name\":\"', replace(replace(item(),'/','-'),'_','-'), '\",\"type\":\"', if(equals(activity('get_akv_secret').Status,'Failed'),'NEW','ROTATED'), '\",\"version\":\"', string(activity('get_vault_metadata').output.data.current_version), '\"}'))",
+                        "value": "@json(concat('{\"name\":\"', variables('akv_name'), '\",\"path\":\"', pipeline().parameters.vault_list_path, item(), '\",\"type\":\"', if(equals(activity('get_akv_secret').Status,'Failed'),'NEW','ROTATED'), '\",\"version\":\"', string(activity('get_vault_metadata').output.data.current_version), '\"}'))",
                         "type": "Expression"
                       }
                     }
@@ -217,7 +233,10 @@
           { "activity": "filter_rotated", "dependencyConditions": [ "Succeeded" ] }
         ],
         "typeProperties": {
-          "expression": { "value": "@greater(length(variables('changes')),0)", "type": "Expression" },
+          "expression": {
+            "value": "@and(pipeline().parameters.send_email, greater(length(variables('changes')),0))",
+            "type": "Expression"
+          },
           "ifTrueActivities": [
             {
               "name": "email_digest_logic_app",
@@ -245,7 +264,7 @@
       },
       {
         "name": "email_failure_logic_app",
-        "description": "Optional: alert when the loop fails",
+        "description": "Alert when the loop fails",
         "type": "WebActivity",
         "dependsOn": [ { "activity": "for_each_vault_secret", "dependencyConditions": [ "Failed" ] } ],
         "policy": { "timeout": "0.00:05:00", "retry": 1, "retryIntervalInSeconds": 30 },
