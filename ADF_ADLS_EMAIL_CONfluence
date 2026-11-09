@@ -1,12 +1,12 @@
 {
-  "name": "sync-hcv-to-akv",
+  "name": "sync-ldap-to-akv",
   "properties": {
-    "description": "Daily sync of HashiCorp Vault KV v2 secrets into Azure Key Vault. AKV secret name comes from display_name inside the secret data (falls back to the Vault object id path). Creates a new AKV version when a secret is new or its Vault version is higher than the vault_version tag. Sends one digest email via Logic App.",
+    "description": "Sync HashiCorp Vault LDAP static roles (ldap/prod/us) into Azure Key Vault. Compares the role's last_vault_rotation with the last_vault_rotation tag on the AKV secret. Creates a new AKV version when a role is new or has rotated, and sends one digest email via Logic App.",
     "parameters": {
       "vault_url": { "type": "string", "defaultValue": "https://hcvault.yourcompany.com:8200" },
       "vault_namespace": { "type": "string", "defaultValue": "your/namespace" },
-      "vault_mount": { "type": "string", "defaultValue": "secret" },
-      "vault_list_path": { "type": "string", "defaultValue": "" },
+      "ldap_mount": { "type": "string", "defaultValue": "ldap/prod/us" },
+      "akv_name_prefix": { "type": "string", "defaultValue": "" },
       "role_id": { "type": "string", "defaultValue": "<approle-role-id>" },
       "approle_secret_id_name": { "type": "string", "defaultValue": "hcv-approle-secret-id" },
       "akv_url": { "type": "string", "defaultValue": "https://kv-cus-synpeacx-prod-01.vault.azure.net" },
@@ -52,14 +52,14 @@
         }
       },
       {
-        "name": "list_vault_secrets",
-        "description": "ADF Web has no LIST method, so use GET with ?list=true",
+        "name": "list_ldap_roles",
+        "description": "List static roles. ADF Web has no LIST method, so use GET with ?list=true",
         "type": "WebActivity",
         "dependsOn": [ { "activity": "hashVaultLogin", "dependencyConditions": [ "Succeeded" ] } ],
         "policy": { "timeout": "0.00:05:00", "retry": 2, "retryIntervalInSeconds": 30, "secureOutput": true, "secureInput": true },
         "typeProperties": {
           "url": {
-            "value": "@{pipeline().parameters.vault_url}/v1/@{pipeline().parameters.vault_mount}/metadata/@{pipeline().parameters.vault_list_path}?list=true",
+            "value": "@{pipeline().parameters.vault_url}/v1/@{pipeline().parameters.ldap_mount}/static-role?list=true",
             "type": "Expression"
           },
           "method": "GET",
@@ -70,51 +70,23 @@
         }
       },
       {
-        "name": "filter_keys",
-        "description": "Keep secrets only, drop sub-folders (keys ending with /)",
-        "type": "Filter",
-        "dependsOn": [ { "activity": "list_vault_secrets", "dependencyConditions": [ "Succeeded" ] } ],
-        "typeProperties": {
-          "items": { "value": "@activity('list_vault_secrets').output.data.keys", "type": "Expression" },
-          "condition": { "value": "@not(endswith(item(),'/'))", "type": "Expression" }
-        }
-      },
-      {
-        "name": "for_each_vault_secret",
+        "name": "for_each_ldap_role",
         "description": "Sequential on purpose: Set variable (akv_name) is not safe in parallel.",
         "type": "ForEach",
-        "dependsOn": [ { "activity": "filter_keys", "dependencyConditions": [ "Succeeded" ] } ],
+        "dependsOn": [ { "activity": "list_ldap_roles", "dependencyConditions": [ "Succeeded" ] } ],
         "typeProperties": {
-          "items": { "value": "@activity('filter_keys').output.Value", "type": "Expression" },
+          "items": { "value": "@activity('list_ldap_roles').output.data.keys", "type": "Expression" },
           "isSequential": true,
           "activities": [
             {
-              "name": "get_vault_metadata",
-              "description": "Metadata only: current_version and updated_time.",
+              "name": "get_role_config",
+              "description": "Role config only: username, dn, rotation_period, last_vault_rotation. No password.",
               "type": "WebActivity",
               "dependsOn": [],
               "policy": { "timeout": "0.00:05:00", "retry": 2, "retryIntervalInSeconds": 30, "secureOutput": false, "secureInput": true },
               "typeProperties": {
                 "url": {
-                  "value": "@{pipeline().parameters.vault_url}/v1/@{pipeline().parameters.vault_mount}/metadata/@{pipeline().parameters.vault_list_path}@{item()}",
-                  "type": "Expression"
-                },
-                "method": "GET",
-                "headers": {
-                  "X-Vault-Token": { "value": "@activity('hashVaultLogin').output.auth.client_token", "type": "Expression" },
-                  "X-Vault-Namespace": { "value": "@pipeline().parameters.vault_namespace", "type": "Expression" }
-                }
-              }
-            },
-            {
-              "name": "get_vault_data",
-              "description": "Needed on every run because display_name lives inside the secret data. Secure input/output keeps values out of run history.",
-              "type": "WebActivity",
-              "dependsOn": [ { "activity": "get_vault_metadata", "dependencyConditions": [ "Succeeded" ] } ],
-              "policy": { "timeout": "0.00:05:00", "retry": 2, "retryIntervalInSeconds": 30, "secureOutput": true, "secureInput": true },
-              "typeProperties": {
-                "url": {
-                  "value": "@{pipeline().parameters.vault_url}/v1/@{pipeline().parameters.vault_mount}/data/@{pipeline().parameters.vault_list_path}@{item()}",
+                  "value": "@{pipeline().parameters.vault_url}/v1/@{pipeline().parameters.ldap_mount}/static-role/@{item()}",
                   "type": "Expression"
                 },
                 "method": "GET",
@@ -126,13 +98,13 @@
             },
             {
               "name": "set_akv_name",
-              "description": "display_name from the secret data, else the object id. Replaces characters AKV does not allow (only letters, digits and - are valid).",
+              "description": "AKV name = optional prefix + role name with underscores replaced (AKV allows only letters, digits and -).",
               "type": "SetVariable",
-              "dependsOn": [ { "activity": "get_vault_data", "dependencyConditions": [ "Succeeded" ] } ],
+              "dependsOn": [ { "activity": "get_role_config", "dependencyConditions": [ "Succeeded" ] } ],
               "typeProperties": {
                 "variableName": "akv_name",
                 "value": {
-                  "value": "@replace(replace(replace(replace(replace(replace(replace(coalesce(activity('get_vault_data').output.data.data?.display_name, item()),' ','-'),'_','-'),'.','-'),'/','-'),':','-'),'@','-'),'+','-')",
+                  "value": "@concat(pipeline().parameters.akv_name_prefix, replace(replace(item(),'_','-'),'.','-'))",
                   "type": "Expression"
                 }
               }
@@ -154,19 +126,38 @@
             },
             {
               "name": "if_new_or_rotated",
+              "description": "True when the secret is missing in AKV, or the role's last_vault_rotation differs from the tag stored in AKV.",
               "type": "IfCondition",
               "dependsOn": [ { "activity": "get_akv_secret", "dependencyConditions": [ "Succeeded", "Failed" ] } ],
               "typeProperties": {
                 "expression": {
-                  "value": "@or(equals(activity('get_akv_secret').Status,'Failed'), greater(int(activity('get_vault_metadata').output.data.current_version), int(coalesce(activity('get_akv_secret').output?.tags?.vault_version,'0'))))",
+                  "value": "@or(equals(activity('get_akv_secret').Status,'Failed'), not(equals(string(coalesce(activity('get_akv_secret').output?.tags?.last_vault_rotation,'')), string(activity('get_role_config').output.data.last_vault_rotation))))",
                   "type": "Expression"
                 },
                 "ifTrueActivities": [
                   {
-                    "name": "put_akv_secret",
-                    "description": "Each PUT creates a new AKV secret version. Stores the whole Vault key/value map as a JSON string.",
+                    "name": "get_ldap_cred",
+                    "description": "Reading static-cred does NOT rotate the password. It only returns the current one.",
                     "type": "WebActivity",
                     "dependsOn": [],
+                    "policy": { "timeout": "0.00:05:00", "retry": 2, "retryIntervalInSeconds": 30, "secureOutput": true, "secureInput": true },
+                    "typeProperties": {
+                      "url": {
+                        "value": "@{pipeline().parameters.vault_url}/v1/@{pipeline().parameters.ldap_mount}/static-cred/@{item()}",
+                        "type": "Expression"
+                      },
+                      "method": "GET",
+                      "headers": {
+                        "X-Vault-Token": { "value": "@activity('hashVaultLogin').output.auth.client_token", "type": "Expression" },
+                        "X-Vault-Namespace": { "value": "@pipeline().parameters.vault_namespace", "type": "Expression" }
+                      }
+                    }
+                  },
+                  {
+                    "name": "put_akv_secret",
+                    "description": "Each PUT creates a new AKV secret version. Value is the static-cred data as a JSON string (username, password, dn, last_password, ttl, last_vault_rotation).",
+                    "type": "WebActivity",
+                    "dependsOn": [ { "activity": "get_ldap_cred", "dependencyConditions": [ "Succeeded" ] } ],
                     "policy": { "timeout": "0.00:05:00", "retry": 2, "retryIntervalInSeconds": 30, "secureOutput": true, "secureInput": true },
                     "typeProperties": {
                       "url": {
@@ -176,13 +167,13 @@
                       "method": "PUT",
                       "headers": { "Content-Type": "application/json" },
                       "body": {
-                        "value": "@{string(activity('get_vault_data').output.data.data)}",
+                        "value": "@{string(activity('get_ldap_cred').output.data)}",
                         "contentType": "application/json",
                         "tags": {
-                          "vault_version": "@{string(activity('get_vault_metadata').output.data.current_version)}",
-                          "vault_updated": "@{activity('get_vault_metadata').output.data.updated_time}",
-                          "vault_path": "@{pipeline().parameters.vault_list_path}@{item()}",
-                          "synced_by": "adf-sync-hcv-to-akv"
+                          "last_vault_rotation": "@{activity('get_role_config').output.data.last_vault_rotation}",
+                          "ldap_username": "@{activity('get_role_config').output.data.username}",
+                          "vault_path": "@{pipeline().parameters.ldap_mount}/static-role/@{item()}",
+                          "synced_by": "adf-sync-ldap-to-akv"
                         }
                       },
                       "authentication": { "type": "MSI", "resource": "https://vault.azure.net" }
@@ -190,13 +181,13 @@
                   },
                   {
                     "name": "append_change",
-                    "description": "Names, paths and versions only, never values",
+                    "description": "Names, paths and rotation time only, never values",
                     "type": "AppendVariable",
                     "dependsOn": [ { "activity": "put_akv_secret", "dependencyConditions": [ "Succeeded" ] } ],
                     "typeProperties": {
                       "variableName": "changes",
                       "value": {
-                        "value": "@json(concat('{\"name\":\"', variables('akv_name'), '\",\"path\":\"', pipeline().parameters.vault_list_path, item(), '\",\"type\":\"', if(equals(activity('get_akv_secret').Status,'Failed'),'NEW','ROTATED'), '\",\"version\":\"', string(activity('get_vault_metadata').output.data.current_version), '\"}'))",
+                        "value": "@json(concat('{\"name\":\"', variables('akv_name'), '\",\"path\":\"', pipeline().parameters.ldap_mount, '/static-role/', item(), '\",\"type\":\"', if(equals(activity('get_akv_secret').Status,'Failed'),'NEW','ROTATED'), '\",\"version\":\"', string(activity('get_role_config').output.data.last_vault_rotation), '\"}'))",
                         "type": "Expression"
                       }
                     }
@@ -210,7 +201,7 @@
       {
         "name": "filter_new",
         "type": "Filter",
-        "dependsOn": [ { "activity": "for_each_vault_secret", "dependencyConditions": [ "Succeeded" ] } ],
+        "dependsOn": [ { "activity": "for_each_ldap_role", "dependencyConditions": [ "Succeeded" ] } ],
         "typeProperties": {
           "items": { "value": "@variables('changes')", "type": "Expression" },
           "condition": { "value": "@equals(item().type,'NEW')", "type": "Expression" }
@@ -219,7 +210,7 @@
       {
         "name": "filter_rotated",
         "type": "Filter",
-        "dependsOn": [ { "activity": "for_each_vault_secret", "dependencyConditions": [ "Succeeded" ] } ],
+        "dependsOn": [ { "activity": "for_each_ldap_role", "dependencyConditions": [ "Succeeded" ] } ],
         "typeProperties": {
           "items": { "value": "@variables('changes')", "type": "Expression" },
           "condition": { "value": "@equals(item().type,'ROTATED')", "type": "Expression" }
@@ -248,7 +239,7 @@
                 "method": "POST",
                 "headers": { "Content-Type": "application/json" },
                 "body": {
-                  "subject": "@{concat('HCV to AKV sync: ', string(length(activity('filter_new').output.Value)), ' new, ', string(length(activity('filter_rotated').output.Value)), ' rotated')}",
+                  "subject": "@{concat('LDAP to AKV sync: ', string(length(activity('filter_new').output.Value)), ' new, ', string(length(activity('filter_rotated').output.Value)), ' rotated')}",
                   "pipeline": "@{pipeline().Pipeline}",
                   "runId": "@{pipeline().RunId}",
                   "timestamp": "@{utcnow()}",
@@ -266,14 +257,14 @@
         "name": "email_failure_logic_app",
         "description": "Alert when the loop fails",
         "type": "WebActivity",
-        "dependsOn": [ { "activity": "for_each_vault_secret", "dependencyConditions": [ "Failed" ] } ],
+        "dependsOn": [ { "activity": "for_each_ldap_role", "dependencyConditions": [ "Failed" ] } ],
         "policy": { "timeout": "0.00:05:00", "retry": 1, "retryIntervalInSeconds": 30 },
         "typeProperties": {
           "url": { "value": "@pipeline().parameters.logic_app_url", "type": "Expression" },
           "method": "POST",
           "headers": { "Content-Type": "application/json" },
           "body": {
-            "subject": "FAILED: HCV to AKV sync",
+            "subject": "FAILED: LDAP to AKV sync",
             "pipeline": "@{pipeline().Pipeline}",
             "runId": "@{pipeline().RunId}",
             "timestamp": "@{utcnow()}",
