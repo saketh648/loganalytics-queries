@@ -1,1 +1,1 @@
-@if(contains(pipeline().parameters.secret_data_json, concat('"', variables('current_key'), '":')), string(json(pipeline().parameters.secret_data_json)[variables('current_key')]), '')
+["client_id","client_secret","password","username","api_key","token"]
