@@ -1,7 +1,7 @@
 {
   "name": "sync-one-kv-secret-to-akv",
   "properties": {
-    "description": "Child pipeline: sync ONE KV v2 secret (all its keys) into AKV. Called once per secret from sync-kv-to-akv. One AKV secret per KV key, named <secret>-<key>. ADF has NO keys() function, so it loops over key_names_json (default [client_id, client_secret]) and skips keys a secret does not have. Returns changes_json via Pipeline Return Value.",
+    "description": "Child pipeline: sync ONE KV v2 secret (all its keys) into AKV. Called once per secret from sync-kv-to-akv. One AKV secret per KV key, named <secret>-<key>. ADF has NO keys() function, so it loops over key_names_json (default [client_id, client_secret]). No nested IfCondition - if_new_or_updated alone checks key-exists AND new/updated. No Pipeline Return Value - parent does not use it.",
     "parameters": {
       "secret_name": {
         "type": "string"
@@ -96,9 +96,9 @@
               }
             },
             {
-              "name": "if_key_exists",
-              "description": "Skip keys in the list that this secret does not have. Checks the raw JSON string for \"key\":",
-              "type": "IfCondition",
+              "name": "set_current_value",
+              "description": "coalesce to empty string if this key is missing in the secret, so this step never fails",
+              "type": "SetVariable",
               "dependsOn": [
                 {
                   "activity": "set_current_key",
@@ -108,44 +108,81 @@
                 }
               ],
               "typeProperties": {
+                "variableName": "current_value",
+                "value": {
+                  "type": "Expression",
+                  "value": "@string(coalesce(json(pipeline().parameters.secret_data_json)[variables('current_key')], ''))"
+                }
+              }
+            },
+            {
+              "name": "get_akv_secret",
+              "description": "404 means the secret does not exist yet. Failure is handled by the next activity.",
+              "type": "WebActivity",
+              "dependsOn": [
+                {
+                  "activity": "set_current_value",
+                  "dependencyConditions": [
+                    "Succeeded"
+                  ]
+                }
+              ],
+              "policy": {
+                "timeout": "0.00:05:00",
+                "retry": 0,
+                "retryIntervalInSeconds": 30,
+                "secureOutput": true,
+                "secureInput": false
+              },
+              "typeProperties": {
+                "method": "GET",
+                "url": {
+                  "type": "Expression",
+                  "value": "@{pipeline().parameters.akv_url}/secrets/@{variables('akv_name')}?api-version=7.4"
+                },
+                "connectVia": {
+                  "referenceName": "adfselfhostexcldir-special-projects",
+                  "type": "IntegrationRuntimeReference"
+                },
+                "authentication": {
+                  "type": "MSI",
+                  "resource": "https://vault.azure.net"
+                }
+              }
+            },
+            {
+              "name": "if_new_or_updated",
+              "description": "Single IfCondition only - ADF does NOT allow an If inside an If. This one checks BOTH: key exists in the secret AND (missing in AKV OR version differs).",
+              "type": "IfCondition",
+              "dependsOn": [
+                {
+                  "activity": "get_akv_secret",
+                  "dependencyConditions": [
+                    "Succeeded",
+                    "Failed"
+                  ]
+                }
+              ],
+              "typeProperties": {
                 "expression": {
                   "type": "Expression",
-                  "value": "@contains(pipeline().parameters.secret_data_json, concat('\"', variables('current_key'), '\":'))"
+                  "value": "@and(contains(pipeline().parameters.secret_data_json, concat('\"', variables('current_key'), '\":')), or(equals(activity('get_akv_secret').Status,'Failed'), not(equals(string(coalesce(activity('get_akv_secret').output?.tags?.vault_version,'')), pipeline().parameters.version))))"
                 },
                 "ifTrueActivities": [
                   {
-                    "name": "set_current_value",
-                    "type": "SetVariable",
-                    "dependsOn": [],
-                    "typeProperties": {
-                      "variableName": "current_value",
-                      "value": {
-                        "type": "Expression",
-                        "value": "@string(json(pipeline().parameters.secret_data_json)[variables('current_key')])"
-                      }
-                    }
-                  },
-                  {
-                    "name": "get_akv_secret",
-                    "description": "404 means the secret does not exist yet. Failure is handled by the next activity.",
+                    "name": "put_akv_secret",
+                    "description": "Each PUT creates a new AKV secret version. Value is only this one KV key's value.",
                     "type": "WebActivity",
-                    "dependsOn": [
-                      {
-                        "activity": "set_current_value",
-                        "dependencyConditions": [
-                          "Succeeded"
-                        ]
-                      }
-                    ],
+                    "dependsOn": [],
                     "policy": {
                       "timeout": "0.00:05:00",
-                      "retry": 0,
+                      "retry": 2,
                       "retryIntervalInSeconds": 30,
                       "secureOutput": true,
-                      "secureInput": false
+                      "secureInput": true
                     },
                     "typeProperties": {
-                      "method": "GET",
+                      "method": "PUT",
                       "url": {
                         "type": "Expression",
                         "value": "@{pipeline().parameters.akv_url}/secrets/@{variables('akv_name')}?api-version=7.4"
@@ -154,6 +191,20 @@
                         "referenceName": "adfselfhostexcldir-special-projects",
                         "type": "IntegrationRuntimeReference"
                       },
+                      "headers": {
+                        "Content-Type": "application/json"
+                      },
+                      "body": {
+                        "value": "@{variables('current_value')}",
+                        "contentType": "application/json",
+                        "tags": {
+                          "kv_key": "@{variables('current_key')}",
+                          "synced_by": "adf-sync-kv-to-akv",
+                          "vault_path": "@{concat(pipeline().parameters.kv_mount,'/',pipeline().parameters.kv_path,'/',pipeline().parameters.secret_name)}",
+                          "vault_updated": "@{pipeline().parameters.updated_time}",
+                          "vault_version": "@{pipeline().parameters.version}"
+                        }
+                      },
                       "authentication": {
                         "type": "MSI",
                         "resource": "https://vault.azure.net"
@@ -161,166 +212,26 @@
                     }
                   },
                   {
-                    "name": "if_new_or_updated",
-                    "description": "True when missing in AKV, or KV version differs from vault_version tag in AKV.",
-                    "type": "IfCondition",
+                    "name": "append_change",
+                    "description": "Names, paths and version only, never values",
+                    "type": "AppendVariable",
                     "dependsOn": [
                       {
-                        "activity": "get_akv_secret",
+                        "activity": "put_akv_secret",
                         "dependencyConditions": [
-                          "Succeeded",
-                          "Failed"
+                          "Succeeded"
                         ]
                       }
                     ],
                     "typeProperties": {
-                      "expression": {
+                      "variableName": "changes",
+                      "value": {
                         "type": "Expression",
-                        "value": "@or(equals(activity('get_akv_secret').Status,'Failed'), not(equals(string(coalesce(activity('get_akv_secret').output?.tags?.vault_version,'')), pipeline().parameters.version)))"
-                      },
-                      "ifTrueActivities": [
-                        {
-                          "name": "put_akv_secret",
-                          "description": "Each PUT creates a new AKV secret version. Value is only this one KV key's value.",
-                          "type": "WebActivity",
-                          "dependsOn": [],
-                          "policy": {
-                            "timeout": "0.00:05:00",
-                            "retry": 2,
-                            "retryIntervalInSeconds": 30,
-                            "secureOutput": true,
-                            "secureInput": true
-                          },
-                          "typeProperties": {
-                            "method": "PUT",
-                            "url": {
-                              "type": "Expression",
-                              "value": "@{pipeline().parameters.akv_url}/secrets/@{variables('akv_name')}?api-version=7.4"
-                            },
-                            "connectVia": {
-                              "referenceName": "adfselfhostexcldir-special-projects",
-                              "type": "IntegrationRuntimeReference"
-                            },
-                            "headers": {
-                              "Content-Type": "application/json"
-                            },
-                            "body": {
-                              "value": "@{variables('current_value')}",
-                              "contentType": "application/json",
-                              "tags": {
-                                "kv_key": "@{variables('current_key')}",
-                                "synced_by": "adf-sync-kv-to-akv",
-                                "vault_path": "@{concat(pipeline().parameters.kv_mount,'/',pipeline().parameters.kv_path,'/',pipeline().parameters.secret_name)}",
-                                "vault_updated": "@{pipeline().parameters.updated_time}",
-                                "vault_version": "@{pipeline().parameters.version}"
-                              }
-                            },
-                            "authentication": {
-                              "type": "MSI",
-                              "resource": "https://vault.azure.net"
-                            }
-                          }
-                        },
-                        {
-                          "name": "append_change",
-                          "description": "Names, paths and version only, never values",
-                          "type": "AppendVariable",
-                          "dependsOn": [
-                            {
-                              "activity": "put_akv_secret",
-                              "dependencyConditions": [
-                                "Succeeded"
-                              ]
-                            }
-                          ],
-                          "typeProperties": {
-                            "variableName": "changes",
-                            "value": {
-                              "type": "Expression",
-                              "value": "@json(concat('{\"name\":\"', variables('akv_name'), '\",\"path\":\"', pipeline().parameters.kv_mount, '/', pipeline().parameters.kv_path, '/', pipeline().parameters.secret_name, '\",\"key\":\"', variables('current_key'), '\",\"type\":\"', if(equals(activity('get_akv_secret').Status,'Failed'),'NEW','UPDATED'), '\",\"version\":\"', pipeline().parameters.version, '\"}'))"
-                            }
-                          }
-                        }
-                      ]
+                        "value": "@json(concat('{\"name\":\"', variables('akv_name'), '\",\"path\":\"', pipeline().parameters.kv_mount, '/', pipeline().parameters.kv_path, '/', pipeline().parameters.secret_name, '\",\"key\":\"', variables('current_key'), '\",\"type\":\"', if(equals(activity('get_akv_secret').Status,'Failed'),'NEW','UPDATED'), '\",\"version\":\"', pipeline().parameters.version, '\"}'))"
+                      }
                     }
                   }
-                ],
-                "ifFalseActivities": []
-              }
-            }
-          ]
-        }
-      },
-      {
-        "name": "filter_new",
-        "type": "Filter",
-        "dependsOn": [
-          {
-            "activity": "for_each_kv_key",
-            "dependencyConditions": [
-              "Succeeded"
-            ]
-          }
-        ],
-        "typeProperties": {
-          "items": {
-            "type": "Expression",
-            "value": "@variables('changes')"
-          },
-          "condition": {
-            "type": "Expression",
-            "value": "@equals(item().type,'NEW')"
-          }
-        }
-      },
-      {
-        "name": "filter_updated",
-        "type": "Filter",
-        "dependsOn": [
-          {
-            "activity": "for_each_kv_key",
-            "dependencyConditions": [
-              "Succeeded"
-            ]
-          }
-        ],
-        "typeProperties": {
-          "items": {
-            "type": "Expression",
-            "value": "@variables('changes')"
-          },
-          "condition": {
-            "type": "Expression",
-            "value": "@equals(item().type,'UPDATED')"
-          }
-        }
-      },
-      {
-        "name": "set_return_value",
-        "description": "Pipeline Return Value: return changes as a JSON string so the parent can see them in run history. Create this in the UI if JSON import complains: Set Variable > Variable type = Pipeline return value.",
-        "type": "SetVariable",
-        "dependsOn": [
-          {
-            "activity": "filter_new",
-            "dependencyConditions": [
-              "Succeeded"
-            ]
-          },
-          {
-            "activity": "filter_updated",
-            "dependencyConditions": [
-              "Succeeded"
-            ]
-          }
-        ],
-        "typeProperties": {
-          "variableName": "Pipeline return value",
-          "value": [
-            {
-              "key": "changes_json",
-              "value": {
-                "type": "Expression",
-                "content": "@{string(variables('changes'))}"
+                ]
               }
             }
           ]
