@@ -51,7 +51,7 @@
             },
             "Compose_File_Content": {
                 "type": "Compose",
-                "inputs": "@base64ToBinary(body('Read_blob_content')?['$content'])",
+                "inputs": "@body('Read_blob_content')",
                 "runAfter": {
                     "Read_blob_content": [
                         "SUCCEEDED"
@@ -70,7 +70,7 @@
                         "attachment": [
                             {
                                 "fileName": "@triggerBody()?['FileName']",
-                                "contentData": "@{outputs('Compose_File_Content')}",
+                                "contentData": "@outputs('Compose_File_Content')",
                                 "contentType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                             }
                         ]
