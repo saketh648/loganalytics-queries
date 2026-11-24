@@ -1,17 +1,85 @@
-"attachment": [
-    {
-        "fileName": "@triggerBody()?['FileName']",
-        "contentData": "@outputs('Compose_File_Content')",
-        "contentType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    }
-]
-
-
-
-"attachment": [
-    {
-        "fileName": "@triggerBody()?['FileName']",
-        "contentData": "@base64ToBinary(outputs('Compose_File_Content'))",
-        "contentType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    }
-]
+{
+    "definition": {
+        "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+        "contentVersion": "1.0.0.0",
+        "triggers": {
+            "When_an_HTTP_request_is_received": {
+                "type": "Request",
+                "kind": "Http",
+                "inputs": {
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "Recipients": { "type": "string" },
+                            "Subject": { "type": "string" },
+                            "Message": { "type": "string" },
+                            "Container": { "type": "string" },
+                            "BlobPath": { "type": "string" },
+                            "FileName": { "type": "string" }
+                        }
+                    }
+                }
+            }
+        },
+        "actions": {
+            "Read_blob_content": {
+                "type": "ServiceProvider",
+                "inputs": {
+                    "parameters": {
+                        "containerName": "@triggerBody()?['Container']",
+                        "blobName": "@triggerBody()?['BlobPath']"
+                    },
+                    "serviceProviderConfiguration": {
+                        "connectionName": "AzureBlob",
+                        "operationId": "readBlob",
+                        "serviceProviderId": "/serviceProviders/AzureBlob"
+                    }
+                },
+                "runAfter": {}
+            },
+            "Send_an_email_(V2)": {
+                "type": "ApiConnection",
+                "inputs": {
+                    "host": {
+                        "connection": {
+                            "referenceName": "office365-1"
+                        }
+                    },
+                    "method": "post",
+                    "path": "/v2/Mail",
+                    "body": {
+                        "To": "@triggerBody()?['Recipients']",
+                        "Subject": "@triggerBody()?['Subject']",
+                        "Body": "<p>@{triggerBody()?['Message']}</p>",
+                        "Importance": "Normal",
+                        "Attachments": [
+                            {
+                                "Name": "@triggerBody()?['FileName']",
+                                "ContentBytes": "@body('Read_blob_content')?['$content']"
+                            }
+                        ]
+                    }
+                },
+                "runAfter": {
+                    "Read_blob_content": ["SUCCEEDED"]
+                }
+            },
+            "Response": {
+                "type": "Response",
+                "kind": "Http",
+                "inputs": {
+                    "statusCode": 200,
+                    "body": {
+                        "status": "Email sent",
+                        "file": "@triggerBody()?['FileName']"
+                    }
+                },
+                "runAfter": {
+                    "Send_an_email_(V2)": ["SUCCEEDED"]
+                }
+            }
+        },
+        "outputs": {}
+    },
+    "kind": "Stateful"
+}
