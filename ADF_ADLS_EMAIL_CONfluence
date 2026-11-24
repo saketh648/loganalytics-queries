@@ -55,7 +55,7 @@
                         "Attachments": [
                             {
                                 "Name": "@coalesce(triggerBody()?['FileName'], substring(triggerBody()?['BlobPath'], add(lastIndexOf(triggerBody()?['BlobPath'], '/'), 1)))",
-                                "ContentBytes": "@body('Read_blob_content')?['$content']"
+                                "ContentBytes": "@base64(body('Read_blob_content')?['content'])"
                             }
                         ]
                     }
