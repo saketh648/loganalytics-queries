@@ -1,1 +1,94 @@
-["client_id","client_secret","password","username","api_key","token"]
+{
+    "definition": {
+        "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+        "contentVersion": "1.0.0.0",
+        "triggers": {
+            "When_an_HTTP_request_is_received": {
+                "type": "Request",
+                "kind": "Http",
+                "inputs": {
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "Recipients": {
+                                "type": "string"
+                            },
+                            "Subject": {
+                                "type": "string"
+                            },
+                            "Message": {
+                                "type": "string"
+                            },
+                            "Container": {
+                                "type": "string"
+                            },
+                            "BlobPath": {
+                                "type": "string"
+                            },
+                            "FileName": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "actions": {
+            "Read_blob_content": {
+                "type": "ServiceProvider",
+                "inputs": {
+                    "parameters": {
+                        "containerName": "@triggerBody()?['Container']",
+                        "blobName": "@triggerBody()?['BlobPath']"
+                    },
+                    "serviceProviderConfiguration": {
+                        "connectionName": "AzureBlob",
+                        "operationId": "readBlob",
+                        "serviceProviderId": "/serviceProviders/AzureBlob"
+                    }
+                },
+                "runAfter": {}
+            },
+            "Compose_File_Content": {
+                "type": "Compose",
+                "inputs": "@base64ToBinary(body('Read_blob_content')?['$content'])",
+                "runAfter": {
+                    "Read_blob_content": [
+                        "SUCCEEDED"
+                    ]
+                }
+            },
+            "Send_Email": {
+                "type": "ServiceProvider",
+                "inputs": {
+                    "parameters": {
+                        "from": "EACXDPPCloudPlatform@usbank.com",
+                        "to": "@triggerBody()?['Recipients']",
+                        "subject": "@triggerBody()?['Subject']",
+                        "body": "@triggerBody()?['Message']",
+                        "importance": "Normal",
+                        "attachment": [
+                            {
+                                "fileName": "@triggerBody()?['FileName']",
+                                "contentData": "@{outputs('Compose_File_Content')}",
+                                "contentType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                            }
+                        ]
+                    },
+                    "serviceProviderConfiguration": {
+                        "connectionName": "Smtp",
+                        "operationId": "sendEmail",
+                        "serviceProviderId": "/serviceProviders/Smtp"
+                    }
+                },
+                "runAfter": {
+                    "Compose_File_Content": [
+                        "SUCCEEDED"
+                    ]
+                }
+            }
+        },
+        "outputs": {}
+    },
+    "kind": "Stateful"
+}
