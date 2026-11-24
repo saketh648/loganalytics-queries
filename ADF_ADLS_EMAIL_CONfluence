@@ -39,7 +39,7 @@
             },
             "Compose_File_Content": {
                 "type": "Compose",
-                "inputs": "@body('Read_blob_content')?['content']?['$content']",
+                "inputs": "@body('Read_blob_content')?['$content']",
                 "runAfter": {
                     "Read_blob_content": ["SUCCEEDED"]
                 }
