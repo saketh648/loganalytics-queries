@@ -37,31 +37,38 @@
                 },
                 "runAfter": {}
             },
-            "Send_an_email_(V2)": {
-                "type": "ApiConnection",
+            "Compose_File_Content": {
+                "type": "Compose",
+                "inputs": "@base64(body('Read_blob_content')?['content'])",
+                "runAfter": {
+                    "Read_blob_content": ["SUCCEEDED"]
+                }
+            },
+            "Send_Email": {
+                "type": "ServiceProvider",
                 "inputs": {
-                    "host": {
-                        "connection": {
-                            "referenceName": "office365"
-                        }
-                    },
-                    "method": "post",
-                    "path": "/v2/Mail",
-                    "body": {
-                        "To": "@triggerBody()?['Recipients']",
-                        "Subject": "@triggerBody()?['Subject']",
-                        "Body": "<p>@{triggerBody()?['Message']}</p>",
-                        "Importance": "Normal",
-                        "Attachments": [
+                    "parameters": {
+                        "from": "EACXDPPCloudPlatform@usbank.com",
+                        "to": "@triggerBody()?['Recipients']",
+                        "subject": "@triggerBody()?['Subject']",
+                        "body": "@triggerBody()?['Message']",
+                        "importance": "Normal",
+                        "attachment": [
                             {
-                                "Name": "@coalesce(triggerBody()?['FileName'], substring(triggerBody()?['BlobPath'], add(lastIndexOf(triggerBody()?['BlobPath'], '/'), 1)))",
-                                "ContentBytes": "@base64(body('Read_blob_content')?['content'])"
+                                "fileName": "@coalesce(triggerBody()?['FileName'], substring(triggerBody()?['BlobPath'], add(lastIndexOf(triggerBody()?['BlobPath'], '/'), 1)))",
+                                "contentData": "@outputs('Compose_File_Content')",
+                                "contentType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                             }
                         ]
+                    },
+                    "serviceProviderConfiguration": {
+                        "connectionName": "Smtp",
+                        "operationId": "sendEmail",
+                        "serviceProviderId": "/serviceProviders/Smtp"
                     }
                 },
                 "runAfter": {
-                    "Read_blob_content": ["SUCCEEDED"]
+                    "Compose_File_Content": ["SUCCEEDED"]
                 }
             },
             "Response": {
@@ -75,7 +82,7 @@
                     }
                 },
                 "runAfter": {
-                    "Send_an_email_(V2)": ["SUCCEEDED"]
+                    "Send_Email": ["SUCCEEDED"]
                 }
             }
         },
