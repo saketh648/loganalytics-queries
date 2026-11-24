@@ -1,1 +1,17 @@
-"contentData": "@base64ToBinary(outputs('Compose_File_Content'))"
+"attachment": [
+    {
+        "fileName": "@triggerBody()?['FileName']",
+        "contentData": "@outputs('Compose_File_Content')",
+        "contentType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    }
+]
+
+
+
+"attachment": [
+    {
+        "fileName": "@triggerBody()?['FileName']",
+        "contentData": "@base64ToBinary(outputs('Compose_File_Content'))",
+        "contentType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    }
+]
