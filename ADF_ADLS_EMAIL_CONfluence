@@ -10,24 +10,12 @@
                     "schema": {
                         "type": "object",
                         "properties": {
-                            "Recipients": {
-                                "type": "string"
-                            },
-                            "Subject": {
-                                "type": "string"
-                            },
-                            "Message": {
-                                "type": "string"
-                            },
-                            "Container": {
-                                "type": "string"
-                            },
-                            "BlobPath": {
-                                "type": "string"
-                            },
-                            "FileName": {
-                                "type": "string"
-                            }
+                            "Recipients": { "type": "string" },
+                            "Subject": { "type": "string" },
+                            "Message": { "type": "string" },
+                            "Container": { "type": "string" },
+                            "BlobPath": { "type": "string" },
+                            "FileName": { "type": "string" }
                         }
                     }
                 }
@@ -51,11 +39,9 @@
             },
             "Compose_File_Content": {
                 "type": "Compose",
-                "inputs": "@body('Read_blob_content')",
+                "inputs": "@body('Read_blob_content')?['content']?['$content']",
                 "runAfter": {
-                    "Read_blob_content": [
-                        "SUCCEEDED"
-                    ]
+                    "Read_blob_content": ["SUCCEEDED"]
                 }
             },
             "Send_Email": {
@@ -82,9 +68,21 @@
                     }
                 },
                 "runAfter": {
-                    "Compose_File_Content": [
-                        "SUCCEEDED"
-                    ]
+                    "Compose_File_Content": ["SUCCEEDED"]
+                }
+            },
+            "Response": {
+                "type": "Response",
+                "kind": "Http",
+                "inputs": {
+                    "statusCode": 200,
+                    "body": {
+                        "status": "Email sent",
+                        "file": "@triggerBody()?['FileName']"
+                    }
+                },
+                "runAfter": {
+                    "Send_Email": ["SUCCEEDED"]
                 }
             }
         },
