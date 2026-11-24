@@ -57,7 +57,8 @@
                             {
                                 "fileName": "@coalesce(triggerBody()?['FileName'], substring(triggerBody()?['BlobPath'], add(lastIndexOf(triggerBody()?['BlobPath'], '/'), 1)))",
                                 "contentData": "@outputs('Compose_File_Content')",
-                                "contentType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                                "contentType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                "contentTransferEncoding": "base64"
                             }
                         ]
                     },
