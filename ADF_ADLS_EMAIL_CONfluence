@@ -42,7 +42,7 @@
                 "inputs": {
                     "host": {
                         "connection": {
-                            "referenceName": "office365-1"
+                            "referenceName": "office365"
                         }
                     },
                     "method": "post",
@@ -54,8 +54,8 @@
                         "Importance": "Normal",
                         "Attachments": [
                             {
-                                "Name": "@triggerBody()?['FileName']",
-                                "ContentBytes": "@body('Read_blob_content')?['$content']"
+                                "Name": "@coalesce(triggerBody()?['FileName'], substring(triggerBody()?['BlobPath'], add(lastIndexOf(triggerBody()?['BlobPath'], '/'), 1)))",
+                                "ContentBytes": "@base64(body('Read_blob_content'))"
                             }
                         ]
                     }
